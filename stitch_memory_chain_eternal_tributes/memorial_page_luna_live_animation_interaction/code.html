@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Luna - Eternal Memorial | Memory Chain</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Libre+Caslon+Text:ital,wght@0,400;0,700;1,400&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-bright": "#fbf9f6",
+                        "tertiary-fixed-dim": "#cec5ba",
+                        "on-primary-container": "#582711",
+                        "outline": "#85736d",
+                        "tertiary-container": "#a49c92",
+                        "surface-tint": "#8a4f36",
+                        "secondary-container": "#ebddd5",
+                        "on-secondary": "#ffffff",
+                        "surface-variant": "#e4e2df",
+                        "secondary-fixed-dim": "#d1c4bc",
+                        "surface-container-low": "#f5f3f0",
+                        "inverse-on-surface": "#f2f0ed",
+                        "on-primary-fixed-variant": "#6e3821",
+                        "error": "#ba1a1a",
+                        "on-tertiary": "#ffffff",
+                        "on-primary": "#ffffff",
+                        "surface-dim": "#dbdad7",
+                        "surface": "#fbf9f6",
+                        "on-secondary-fixed": "#211a16",
+                        "surface-container": "#efeeeb",
+                        "secondary-fixed": "#ede0d8",
+                        "background": "#fbf9f6",
+                        "tertiary": "#645d55",
+                        "surface-container-highest": "#e4e2df",
+                        "on-secondary-container": "#6a615b",
+                        "primary-container": "#d48c6f",
+                        "on-secondary-fixed-variant": "#4e453f",
+                        "inverse-primary": "#ffb598",
+                        "on-tertiary-fixed-variant": "#4c463e",
+                        "on-tertiary-container": "#39342d",
+                        "primary-fixed": "#ffdbce",
+                        "outline-variant": "#d8c2ba",
+                        "primary": "#8a4f36",
+                        "error-container": "#ffdad6",
+                        "on-background": "#1b1c1a",
+                        "on-surface": "#1b1c1a",
+                        "on-tertiary-fixed": "#1f1b14",
+                        "surface-container-lowest": "#ffffff",
+                        "on-primary-fixed": "#370e00",
+                        "secondary": "#665d56",
+                        "primary-fixed-dim": "#ffb598",
+                        "surface-container-high": "#eae8e5",
+                        "inverse-surface": "#30312f",
+                        "on-error-container": "#93000a",
+                        "tertiary-fixed": "#ebe1d6",
+                        "on-surface-variant": "#53433e",
+                        "on-error": "#ffffff"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "stack-sm": "8px",
+                        "container-max": "1200px",
+                        "stack-md": "24px",
+                        "gutter": "24px",
+                        "stack-lg": "48px",
+                        "unit": "8px",
+                        "margin-mobile": "24px",
+                        "margin-desktop": "64px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Libre Caslon Text"],
+                        "display-lg-mobile": ["Libre Caslon Text"],
+                        "body-sm": ["Plus Jakarta Sans"],
+                        "body-lg": ["Plus Jakarta Sans"],
+                        "display-lg": ["Libre Caslon Text"],
+                        "body-md": ["Plus Jakarta Sans"],
+                        "label-md": ["Plus Jakarta Sans"],
+                        "headline-sm": ["Libre Caslon Text"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["32px", { "lineHeight": "40px", "fontWeight": "400" }],
+                        "display-lg-mobile": ["36px", { "lineHeight": "44px", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "body-sm": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "display-lg": ["48px", { "lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "400" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "headline-sm": ["24px", { "lineHeight": "32px", "fontWeight": "400" }]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background antialiased pt-24 min-h-screen flex flex-col font-body-md text-body-md">
+<!-- TopNavBar -->
+<nav class="bg-surface dark:bg-surface-dim font-headline-sm text-headline-sm font-body-md text-body-md fixed top-0 w-full bg-surface/80 dark:bg-surface-dim/80 backdrop-blur-md border-b border-outline-variant/15 flat no shadows z-50">
+<div class="flex justify-between items-center px-margin-mobile md:px-margin-desktop py-4 max-w-container-max mx-auto">
+<div class="font-headline-sm text-headline-sm text-primary dark:text-primary-fixed hover:opacity-80 transition-opacity cursor-pointer transition-all duration-300">
+                Memory Chain
+            </div>
+<div class="hidden md:flex space-x-8 items-center">
+<a class="text-primary font-bold border-b-2 border-primary pb-1 cursor-pointer transition-all duration-300" href="#">Memorials</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer transition-all duration-300" href="#">How it Works</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer transition-all duration-300" href="#">Our Mission</a>
+</div>
+<button class="bg-primary text-on-primary px-6 py-2 rounded-xl hover:opacity-80 transition-opacity font-body-sm text-body-sm font-medium cursor-pointer transition-all duration-300 hidden md:block">
+                Create Eternal Memorial
+            </button>
+<button class="md:hidden text-on-surface-variant p-2">
+<span class="material-symbols-outlined">menu</span>
+</button>
+</div>
+</nav>
+<!-- Main Memorial Canvas -->
+<main class="flex-grow flex flex-col items-center px-margin-mobile md:px-margin-desktop py-12 md:py-20 w-full max-w-container-max mx-auto">
+<!-- Portrait & Header -->
+<div class="flex flex-col items-center text-center space-y-stack-md w-full max-w-2xl mx-auto mb-stack-lg">
+<div class="relative w-48 h-48 md:w-64 md:h-64 rounded-full overflow-hidden border-4 border-surface shadow-[0_8px_30px_rgb(0,0,0,0.12)] group">
+<img alt="Luna the Beagle" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLs4RDIJzMpJ_HLQPIFo9GcJskLjXZ_BEzmnilzciUMGTqO_gqeH0B0Pgfzp56rdHdQ5GG9VxhhtuNsyOVd2dL1_ihQI3IVlVjoPd5Uwz-UKiwVeQF8KAUlREDUNDKxR_4FzKmsrDYSNY4yQuq6ulGDCkUmFQyAk0jTVZ2AT4tVgIz4FoVcF32-FqJ6rBmhSGVRaB-7rbCJtYeY7jQoFFLzpCXk-xCcVvgjBvsgVwXPp_74M7H6x7It5Lj0"/>
+<!-- Live Badge -->
+<div class="absolute top-4 right-4 bg-surface/80 backdrop-blur-md px-3 py-1 rounded-full flex items-center gap-2 border border-outline-variant/20 z-10">
+<span class="w-2 h-2 bg-green-500 rounded-full" style="animation: pulse-green 2s infinite ease-in-out;"></span>
+<span class="font-label-md text-label-md text-on-surface uppercase tracking-wider">Live</span>
+</div>
+<!-- Hover Overlay -->
+<div class="absolute inset-0 bg-primary/10 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center text-center p-4 cursor-pointer">
+<span class="material-symbols-outlined text-primary text-4xl mb-2">play_circle</span>
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Hover to see Luna alive</span>
+</div></div>
+<div class="space-y-2">
+<h1 class="font-display-lg-mobile md:font-display-lg text-display-lg-mobile md:text-display-lg text-on-surface">Luna</h1>
+<p class="font-label-md text-label-md text-on-surface-variant uppercase tracking-wider">2012 – 2024</p>
+<div class="flex justify-center gap-2 pt-2">
+<span class="px-4 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md">Canine</span>
+<span class="px-4 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md">Beagle</span>
+</div>
+</div>
+<div class="w-12 h-px bg-primary/30 mx-auto mt-6"></div>
+</div>
+<!-- Biography -->
+<section class="max-w-2xl mx-auto text-center mb-stack-lg px-4 md:px-0">
+<p class="font-body-lg text-body-lg text-on-surface-variant leading-relaxed text-balance">
+                "Luna was more than just a companion; she was the heartbeat of our home. A gentle soul who found joy in sun-drenched naps and the simple pleasure of a long walk through the autumn leaves. Her loyalty was as unwavering as her spirit was kind, leaving paw prints on our hearts that time can never erase."
+            </p>
+</section>
+<!-- Memory Actions Grid -->
+<section class="w-full max-w-4xl mx-auto mb-stack-lg">
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+<!-- Action Card -->
+<div class="col-span-1 md:col-span-1 bg-surface-container-low rounded-xl p-6 border border-outline-variant/15 flex flex-col items-center justify-center text-center space-y-4 hover:bg-surface-container transition-colors cursor-pointer group">
+<div class="w-16 h-16 rounded-full bg-primary-container/20 flex items-center justify-center group-hover:bg-primary-container/40 transition-colors">
+<span class="material-symbols-outlined text-primary text-3xl" style="font-variation-settings: 'FILL' 1;">local_fire_department</span>
+</div>
+<div>
+<h3 class="font-headline-sm text-headline-sm text-on-surface mb-1">Light a Virtual Candle</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Join 42 others in remembering Luna today.</p>
+</div>
+<button class="px-6 py-2 rounded-xl bg-primary text-on-primary font-body-sm text-body-sm hover:opacity-90 transition-opacity mt-2">
+                        Ignite Memory
+                    </button>
+</div>
+<!-- Guestbook Cards -->
+<div class="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+<div class="bg-surface rounded-xl p-6 border border-outline-variant/30 flex flex-col justify-between shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
+<div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-bl from-primary-container/10 to-transparent rounded-bl-3xl"></div>
+<p class="font-body-md text-body-md text-on-surface-variant italic mb-4">"A beautiful soul, forever missed. Running free in endless fields now."</p>
+<div class="flex items-center space-x-3">
+<div class="w-8 h-8 rounded-full bg-tertiary-container flex items-center justify-center text-on-tertiary-container font-label-md text-label-md">S</div>
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Sarah Jenkins</span>
+</div>
+</div>
+<div class="bg-surface rounded-xl p-6 border border-outline-variant/30 flex flex-col justify-between shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
+<div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-bl from-secondary-container/20 to-transparent rounded-bl-3xl"></div>
+<p class="font-body-md text-body-md text-on-surface-variant italic mb-4">"Rest in peace, sweet Luna. Your gentle spirit touched everyone."</p>
+<div class="flex items-center space-x-3">
+<div class="w-8 h-8 rounded-full bg-secondary-container flex items-center justify-center text-on-secondary-container font-label-md text-label-md">M</div>
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Mark &amp; Family</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- Web3 Provenance Footer -->
+<div class="mt-auto w-full max-w-2xl mx-auto pt-12 border-t border-outline-variant/20 flex flex-col md:flex-row items-center justify-between gap-6 opacity-80">
+<div class="flex items-start space-x-4">
+<div class="mt-1">
+<span class="material-symbols-outlined text-primary">link</span>
+</div>
+<div>
+<p class="font-label-md text-label-md text-primary uppercase tracking-wider mb-1">Eternal Provenance</p>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Secured forever on Arweave network.</p>
+<p class="font-body-sm text-body-sm text-on-surface-variant font-mono mt-1 text-xs">Decentralized Ledger ID: 0x47b...c9e</p>
+</div>
+</div>
+<div class="flex flex-col items-center">
+<div class="w-20 h-20 bg-white p-1 rounded-lg border border-outline-variant/30 shadow-sm flex items-center justify-center">
+<span class="material-symbols-outlined text-4xl text-on-surface-variant opacity-50">qr_code_2</span>
+</div>
+<span class="font-label-md text-label-md text-on-surface-variant mt-2">Share Memorial</span>
+</div>
+</div>
+</main>
+<!-- Footer -->
+<footer class="bg-surface-container-low dark:bg-surface-container-highest font-body-sm text-body-sm font-label-md text-label-md w-full py-12 bg-surface-container-low dark:bg-surface-container-highest border-t border-outline-variant/15 flat no shadows flex flex-col md:flex-row justify-between items-center px-margin-mobile md:px-margin-desktop space-y-stack-md md:space-y-0 mt-auto">
+<div class="font-headline-sm text-headline-sm text-primary mb-4 md:mb-0">
+            Memory Chain
+        </div>
+<div class="text-on-surface-variant mb-4 md:mb-0">
+            © 2024 Memory Chain. Preserving eternal bonds on-chain.
+        </div>
+<div class="flex space-x-6 flex-wrap justify-center">
+<a class="text-on-tertiary-fixed-variant hover:text-primary transition-colors cursor-pointer" href="#">Privacy Policy</a>
+<a class="text-on-tertiary-fixed-variant hover:text-primary transition-colors cursor-pointer" href="#">Terms of Service</a>
+<a class="text-on-tertiary-fixed-variant hover:text-primary transition-colors cursor-pointer" href="#">Support</a>
+<a class="text-on-tertiary-fixed-variant hover:text-primary transition-colors cursor-pointer" href="#">FAQ</a>
+</div>
+</footer>
+</body></html>

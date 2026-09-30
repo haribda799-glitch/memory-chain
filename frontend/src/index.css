@@ -1,0 +1,147 @@
+@import url('https://fonts.googleapis.com/css2?family=Libre+Caslon+Text:wght@400;700&family=Plus+Jakarta+Sans:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+@import "tailwindcss";
+
+
+@theme {
+  /* Colors */
+  --color-on-primary-container: #582711;
+  --color-primary-fixed: #ffdbce;
+  --color-inverse-primary: #ffb598;
+  --color-surface-tint: #8a4f36;
+  --color-tertiary-fixed: #ebe1d6;
+  --color-on-error: #ffffff;
+  --color-tertiary-fixed-dim: #cec5ba;
+  --color-on-background: #1b1c1a;
+  --color-outline: #85736d;
+  --color-on-secondary: #ffffff;
+  --color-surface-container-high: #eae8e5;
+  --color-surface: #fbf9f6;
+  --color-background: #fbf9f6;
+  --color-primary-fixed-dim: #ffb598;
+  --color-on-primary-fixed: #370e00;
+  --color-on-tertiary: #ffffff;
+  --color-surface-bright: #fbf9f6;
+  --color-surface-container-highest: #e4e2df;
+  --color-primary: #8a4f36;
+  --color-tertiary-container: #a49c92;
+  --color-surface-variant: #e4e2df;
+  --color-inverse-surface: #30312f;
+  --color-on-surface-variant: #53433e;
+  --color-on-secondary-container: #6a615b;
+  --color-on-error-container: #93000a;
+  --color-primary-container: #d48c6f;
+  --color-secondary-container: #ebddd5;
+  --color-error-container: #ffdad6;
+  --color-on-secondary-fixed: #211a16;
+  --color-on-tertiary-fixed: #1f1b14;
+  --color-on-tertiary-fixed-variant: #4c463e;
+  --color-inverse-on-surface: #f2f0ed;
+  --color-error: #ba1a1a;
+  --color-tertiary: #645d55;
+  --color-outline-variant: #d8c2ba;
+  --color-surface-container-low: #f5f3f0;
+  --color-surface-container: #efeeeb;
+  --color-on-tertiary-container: #39342d;
+  --color-secondary-fixed-dim: #d1c4bc;
+  --color-on-secondary-fixed-variant: #4e453f;
+  --color-secondary-fixed: #ede0d8;
+  --color-surface-container-lowest: #ffffff;
+  --color-on-primary-fixed-variant: #6e3821;
+  --color-surface-dim: #dbdad7;
+  --color-secondary: #665d56;
+  --color-on-surface: #1b1c1a;
+  --color-on-primary: #ffffff;
+
+  /* Border Radius */
+  --radius: 0.25rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --spacing-gutter: 24px;
+  --spacing-container-max: 1200px;
+  --spacing-stack-lg: 48px;
+  --spacing-stack-sm: 8px;
+  --spacing-stack-md: 24px;
+  --spacing-margin-mobile: 24px;
+  --spacing-margin-desktop: 64px;
+  --spacing-unit: 8px;
+
+  /* Typography Fonts */
+  --font-headline-sm: "Libre Caslon Text";
+  --font-headline-md: "Libre Caslon Text";
+  --font-body-lg: "Plus Jakarta Sans";
+  --font-display-lg: "Libre Caslon Text";
+  --font-label-md: "Plus Jakarta Sans";
+  --font-body-sm: "Plus Jakarta Sans";
+  --font-body-md: "Plus Jakarta Sans";
+  --font-display-lg-mobile: "Libre Caslon Text";
+
+  /* Typography Font Sizes */
+  --text-headline-sm: 24px;
+  --text-headline-sm--line-height: 32px;
+  --text-headline-sm--font-weight: 400;
+
+  --text-headline-md: 32px;
+  --text-headline-md--line-height: 40px;
+  --text-headline-md--font-weight: 400;
+
+  --text-body-lg: 18px;
+  --text-body-lg--line-height: 28px;
+  --text-body-lg--font-weight: 400;
+
+  --text-display-lg: 48px;
+  --text-display-lg--line-height: 56px;
+  --text-display-lg--letter-spacing: -0.02em;
+  --text-display-lg--font-weight: 400;
+
+  --text-label-md: 12px;
+  --text-label-md--line-height: 16px;
+  --text-label-md--letter-spacing: 0.05em;
+  --text-label-md--font-weight: 600;
+
+  --text-body-sm: 14px;
+  --text-body-sm--line-height: 20px;
+  --text-body-sm--font-weight: 400;
+
+  --text-body-md: 16px;
+  --text-body-md--line-height: 24px;
+  --text-body-md--font-weight: 400;
+
+  --text-display-lg-mobile: 36px;
+  --text-display-lg-mobile--line-height: 44px;
+  --text-display-lg-mobile--letter-spacing: -0.01em;
+  --text-display-lg-mobile--font-weight: 400;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-on-surface);
+    font-family: var(--font-body-md);
+    font-size: var(--text-body-md);
+    line-height: var(--text-body-md--line-height);
+    font-weight: var(--text-body-md--font-weight);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  vertical-align: middle;
+  user-select: none;
+}
+
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

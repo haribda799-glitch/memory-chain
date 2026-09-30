@@ -1,0 +1,287 @@
+<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Memory Chain - Onboarding Step 1</title>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<!-- Google Fonts -->
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Libre+Caslon+Text:ital,wght@0,400;0,700;1,400&amp;family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Tailwind Config -->
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "primary-fixed": "#ffdbce",
+                        "primary-container": "#d48c6f",
+                        "on-secondary-fixed": "#211a16",
+                        "on-secondary-fixed-variant": "#4e453f",
+                        "primary": "#8a4f36",
+                        "on-primary-fixed": "#370e00",
+                        "secondary": "#665d56",
+                        "on-tertiary-fixed": "#1f1b14",
+                        "tertiary-fixed": "#ebe1d6",
+                        "background": "#fbf9f6",
+                        "on-tertiary-fixed-variant": "#4c463e",
+                        "on-primary": "#ffffff",
+                        "on-tertiary-container": "#39342d",
+                        "secondary-fixed": "#ede0d8",
+                        "on-error": "#ffffff",
+                        "secondary-container": "#ebddd5",
+                        "primary-fixed-dim": "#ffb598",
+                        "on-tertiary": "#ffffff",
+                        "surface-container": "#efeeeb",
+                        "on-error-container": "#93000a",
+                        "surface-container-highest": "#e4e2df",
+                        "on-primary-fixed-variant": "#6e3821",
+                        "secondary-fixed-dim": "#d1c4bc",
+                        "surface-dim": "#dbdad7",
+                        "surface-container-low": "#f5f3f0",
+                        "on-background": "#1b1c1a",
+                        "inverse-on-surface": "#f2f0ed",
+                        "inverse-surface": "#30312f",
+                        "tertiary": "#645d55",
+                        "on-secondary": "#ffffff",
+                        "on-secondary-container": "#6a615b",
+                        "tertiary-fixed-dim": "#cec5ba",
+                        "error-container": "#ffdad6",
+                        "tertiary-container": "#a49c92",
+                        "surface-bright": "#fbf9f6",
+                        "surface-tint": "#8a4f36",
+                        "on-surface": "#1b1c1a",
+                        "surface-container-lowest": "#ffffff",
+                        "on-surface-variant": "#53433e",
+                        "on-primary-container": "#582711",
+                        "surface-variant": "#e4e2df",
+                        "outline": "#85736d",
+                        "inverse-primary": "#ffb598",
+                        "surface": "#fbf9f6",
+                        "outline-variant": "#d8c2ba",
+                        "error": "#ba1a1a",
+                        "surface-container-high": "#eae8e5"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "unit": "8px",
+                        "stack-sm": "8px",
+                        "stack-md": "24px",
+                        "stack-lg": "48px",
+                        "margin-mobile": "24px",
+                        "margin-desktop": "64px",
+                        "gutter": "24px",
+                        "container-max": "1200px"
+                    },
+                    "fontFamily": {
+                        "body-lg": ["Plus Jakarta Sans"],
+                        "headline-md": ["Libre Caslon Text"],
+                        "headline-sm": ["Libre Caslon Text"],
+                        "display-lg": ["Libre Caslon Text"],
+                        "body-md": ["Plus Jakarta Sans"],
+                        "label-md": ["Plus Jakarta Sans"],
+                        "display-lg-mobile": ["Libre Caslon Text"],
+                        "body-sm": ["Plus Jakarta Sans"]
+                    },
+                    "fontSize": {
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "headline-md": ["32px", { "lineHeight": "40px", "fontWeight": "400" }],
+                        "headline-sm": ["24px", { "lineHeight": "32px", "fontWeight": "400" }],
+                        "display-lg": ["48px", { "lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "400" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "display-lg-mobile": ["36px", { "lineHeight": "44px", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "body-sm": ["14px", { "lineHeight": "20px", "fontWeight": "400" }]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        body {
+            background-color: theme('colors.background');
+            color: theme('colors.on-background');
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        .drag-active {
+            border-color: theme('colors.primary');
+            background-color: theme('colors.surface-container-low');
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col font-body-md text-body-md">
+<!-- TopNavBar (Suppressed for Onboarding/Transactional as per rules, replacing with a simple brand header) -->
+<header class="w-full py-8 px-margin-mobile md:px-margin-desktop flex justify-center items-center">
+<a class="font-headline-sm text-headline-sm text-primary dark:text-primary-fixed" href="#">Memory Chain</a>
+</header>
+<main class="flex-grow flex flex-col items-center px-margin-mobile md:px-margin-desktop py-stack-md w-full max-w-container-max mx-auto">
+<!-- Progress Indicator -->
+<div class="w-full max-w-2xl mb-stack-lg">
+<div class="flex justify-between items-end mb-stack-sm">
+<h1 class="font-headline-md text-headline-md text-on-background">Begin the Memorial</h1>
+<span class="font-label-md text-label-md text-on-surface-variant uppercase tracking-widest">Step 1 of 3: Basic Info</span>
+</div>
+<div class="w-full h-1 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-primary w-1/3 transition-all duration-500 ease-out rounded-full"></div>
+</div>
+</div>
+<!-- Main Form Card -->
+<div class="w-full max-w-2xl bg-surface rounded-[16px] border border-outline-variant/15 p-stack-md md:p-stack-lg mb-stack-lg">
+<form action="#" class="space-y-stack-md" method="POST">
+<!-- Photo Drag & Drop -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant uppercase mb-2">Pet Portrait</label>
+<div class="w-full h-48 border-2 border-dashed border-outline-variant/40 rounded-[16px] flex flex-col items-center justify-center cursor-pointer hover:bg-surface-container transition-colors group" id="dropzone">
+<span class="material-symbols-outlined text-4xl text-outline mb-2 group-hover:text-primary transition-colors" data-icon="add_photo_alternate" style="font-variation-settings: 'FILL' 0;">add_photo_alternate</span>
+<p class="font-body-md text-body-md text-on-surface-variant text-center px-4">
+                            Drag and drop a beloved photo here, or <span class="text-primary underline">browse</span>.
+                        </p>
+<p class="font-body-sm text-body-sm text-outline mt-1">High quality JPG or PNG (max 5MB)</p>
+<input accept="image/*" class="hidden" type="file">
+</div>
+</div>
+<!-- Basic Info Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-stack-md">
+<!-- Pet Name -->
+<div class="md:col-span-2">
+<label class="block font-label-md text-label-md text-on-surface-variant uppercase mb-2" for="petName">Pet Name</label>
+<input class="w-full bg-transparent border-b border-outline-variant focus:border-primary focus:ring-0 px-0 py-2 font-body-lg text-body-lg text-on-background placeholder-outline transition-colors" id="petName" name="petName" placeholder="e.g. Bella" type="text">
+</div>
+<!-- Birth Year -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant uppercase mb-2" for="birthYear">Birth Year</label>
+<input class="w-full bg-transparent border-b border-outline-variant focus:border-primary focus:ring-0 px-0 py-2 font-body-lg text-body-lg text-on-background placeholder-outline transition-colors" id="birthYear" max="2024" min="1990" name="birthYear" placeholder="YYYY" type="number">
+</div>
+<!-- Passing Year -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant uppercase mb-2" for="passingYear">Passing Year</label>
+<input class="w-full bg-transparent border-b border-outline-variant focus:border-primary focus:ring-0 px-0 py-2 font-body-lg text-body-lg text-on-background placeholder-outline transition-colors" id="passingYear" max="2024" min="1990" name="passingYear" placeholder="YYYY" type="number">
+</div>
+</div>
+<!-- Biography -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant uppercase mb-2" for="bio">A Brief Memory</label>
+<textarea class="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg p-4 font-body-md text-body-md text-on-background placeholder-outline focus:border-primary focus:ring-1 focus:ring-primary transition-all resize-none" id="bio" name="bio" placeholder="Tell us about their favorite toy, habit, or memory..." rows="4"></textarea>
+</div><div class="bg-surface-container-low rounded-[16px] p-4 border border-outline-variant/15">
+    <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center space-x-2">
+            <span class="font-headline-sm text-on-background" style="font-family: 'Libre Caslon Text', serif;">Animate Portrait with AI (Live Memorial)</span>
+            <span class="bg-primary-container/20 text-primary text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-tighter">Premium ✨</span>
+        </div>
+        <div class="relative inline-block w-12 h-6 transition duration-200 ease-in">
+            <input type="checkbox" id="ai-toggle" class="hidden peer" checked="">
+            <label for="ai-toggle" class="absolute top-0 left-0 right-0 bottom-0 bg-outline-variant/30 rounded-full cursor-pointer transition-colors peer-checked:bg-primary"></label>
+            <div class="absolute top-1 left-1 bg-white w-4 h-4 rounded-full transition-transform peer-checked:translate-x-6"></div>
+        </div>
+    </div>
+    <p class="text-body-sm" style="font-family: 'Plus Jakarta Sans', sans-serif; color: #5A5047;">
+        Our AI will gently animate your pet's photo (soft breathing, blinking, and natural head tilt) to create a lifelike eternal memory.
+    </p>
+</div>
+</form>
+</div>
+<!-- Social Login Bridge -->
+<div class="w-full max-w-2xl bg-surface-container rounded-[16px] p-stack-md flex flex-col md:flex-row items-center justify-between border border-outline-variant/15 mb-stack-lg">
+<div class="mb-4 md:mb-0 md:mr-6 text-center md:text-left">
+<h3 class="font-headline-sm text-headline-sm text-on-background mb-1">Secure Their Legacy</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Create a secure vault to preserve these memories eternally on the blockchain.</p>
+</div>
+<div class="flex flex-col space-y-3 w-full md:w-auto min-w-[200px]">
+<button class="w-full flex items-center justify-center space-x-2 bg-on-primary border border-outline-variant/30 text-on-background py-3 px-6 rounded-[16px] hover:bg-surface-container-low transition-colors font-label-md text-label-md uppercase tracking-wider">
+<svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path d="M22.56 12.25C22.56 11.47 22.49 10.72 22.37 10H12V14.26H17.92C17.67 15.63 16.89 16.81 15.7 17.6V20.34H19.26C21.34 18.42 22.56 15.58 22.56 12.25Z" fill="#4285F4"></path>
+<path d="M12 23C14.97 23 17.46 22.01 19.26 20.34L15.7 17.6C14.73 18.26 13.48 18.66 12 18.66C9.13 18.66 6.7 16.73 5.82 14.13H2.15V16.98C3.96 20.57 7.7 23 12 23Z" fill="#34A853"></path>
+<path d="M5.82 14.13C5.6 13.47 5.46 12.76 5.46 12C5.46 11.24 5.6 10.53 5.82 9.87V7.02H2.15C1.41 8.5 1 10.2 1 12C1 13.8 1.41 15.5 2.15 16.98L5.82 14.13Z" fill="#FBBC05"></path>
+<path d="M12 5.34C13.62 5.34 15.07 5.9 16.21 6.99L19.34 3.86C17.46 2.1 14.97 1 12 1C7.7 1 3.96 3.43 2.15 7.02L5.82 9.87C6.7 7.27 9.13 5.34 12 5.34Z" fill="#EA4335"></path>
+</svg>
+<span class="">Google</span>
+</button>
+<button class="w-full flex items-center justify-center space-x-2 bg-on-primary border border-outline-variant/30 text-on-background py-3 px-6 rounded-[16px] hover:bg-surface-container-low transition-colors font-label-md text-label-md uppercase tracking-wider">
+<span class="material-symbols-outlined text-xl" data-icon="mail" style="font-variation-settings: 'FILL' 0;">mail</span>
+<span class="">Email</span>
+</button>
+</div>
+</div>
+<!-- Navigation Actions -->
+<div class="w-full max-w-2xl flex justify-between items-center pt-stack-md border-t border-outline-variant/15">
+<button class="px-6 py-3 border border-secondary text-secondary rounded-[16px] hover:bg-secondary/5 transition-colors font-label-md text-label-md uppercase tracking-wider" type="button">
+                Back
+            </button>
+<button class="px-8 py-4 bg-primary-container text-on-primary rounded-[16px] hover:bg-primary-container/90 transition-colors font-label-md text-label-md uppercase tracking-wider shadow-sm flex items-center space-x-2 group" type="button">
+<span class="">Proceed to Preservation</span>
+<span class="material-symbols-outlined transform group-hover:translate-x-1 transition-transform" data-icon="arrow_forward" style="font-variation-settings: 'FILL' 0;">arrow_forward</span>
+</button>
+</div>
+</main>
+<!-- Footer (Suppressed for Onboarding to keep focus on the task) -->
+<script>
+        // Simple drag and drop styling script
+        const dropzone = document.getElementById('dropzone');
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropzone.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropzone.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropzone.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight(e) {
+            dropzone.classList.add('drag-active');
+        }
+
+        function unhighlight(e) {
+            dropzone.classList.remove('drag-active');
+        }
+
+        dropzone.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            let dt = e.dataTransfer;
+            let files = dt.files;
+            
+            // In a real app, handle the file upload here
+            const textElement = dropzone.querySelector('p:first-of-type');
+            if(files.length > 0) {
+                textElement.innerHTML = `<span class="text-primary font-bold">${files[0].name}</span> selected.`;
+                dropzone.querySelector('span.material-symbols-outlined').style.fontVariationSettings = "'FILL' 1";
+                dropzone.querySelector('span.material-symbols-outlined').style.color = "var(--tw-colors-primary)";
+            }
+        }
+        
+        dropzone.addEventListener('click', () => {
+            dropzone.querySelector('input').click();
+        });
+        
+        dropzone.querySelector('input').addEventListener('change', function() {
+            const textElement = dropzone.querySelector('p:first-of-type');
+            if(this.files.length > 0) {
+                textElement.innerHTML = `<span class="text-primary font-bold">${this.files[0].name}</span> selected.`;
+                dropzone.querySelector('span.material-symbols-outlined').style.fontVariationSettings = "'FILL' 1";
+                dropzone.querySelector('span.material-symbols-outlined').style.color = "var(--tw-colors-primary)";
+            }
+        });
+    </script>
+
+
+</body></html>

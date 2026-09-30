@@ -1,0 +1,40 @@
+# Environment & secrets
+.env
+.env.*
+*.json.key
+arweave-wallet.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+.coverage
+
+# Moccasin / Vyper
+out/
+lib/
+.build/
+.deployments.db
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs
