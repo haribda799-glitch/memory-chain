@@ -7,7 +7,7 @@ export default defineConfig({
     tailwindcss(),
     react(),
   ],
-  base: '/',
+  base: process.env.NODE_ENV === 'production' ? '/memory-chain/' : '/',
   build: { outDir: 'dist' },
   define: { global: 'globalThis' },
 });
