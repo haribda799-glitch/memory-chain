@@ -9,6 +9,7 @@ import Candle from './Candle';
 import CandleAltar from './CandleAltar';
 import LightCandleModal from './LightCandleModal';
 import ReportModal from './ReportModal';
+import ShareModal from './ShareModal';
 import { parseMemorial } from '../utils/memorialParser';
 
 export default function MemorialPage() {
@@ -28,6 +29,7 @@ export default function MemorialPage() {
   const [metadata, setMetadata] = useState(null);
   const [showCandleModal, setShowCandleModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [pendingCandleOpen, setPendingCandleOpen] = useState(false);
   const [reportRefreshTrigger, setReportRefreshTrigger] = useState(0);
 
@@ -263,28 +265,8 @@ export default function MemorialPage() {
 
   const { owner, arweaveUri: arweaveTxId, petName, createdAt } = parsedMemorial;
 
-  const handleShare = async () => {
-    const shareData = {
-      title: `${petName} Memorial`,
-      text: `In loving memory of ${petName}`,
-      url: window.location.href,
-    };
-
-    if (navigator.share && navigator.canShare && navigator.canShare(shareData)) {
-      try {
-        await navigator.share(shareData);
-        return;
-      } catch (err) {
-        if (err.name !== 'AbortError') console.error('Share failed:', err);
-      }
-    }
-
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      alert('Memorial link copied to clipboard!');
-    } catch (err) {
-      console.error('Clipboard failed:', err);
-    }
+  const handleShare = () => {
+    setShowShareModal(true);
   };
 
   // Resolve image: handle ar:// URI scheme from production mints
@@ -584,6 +566,15 @@ export default function MemorialPage() {
           refetchReportWeight();
           if (refetchFlagged) refetchFlagged();
         }}
+      />
+
+      {/* Share Modal */}
+      <ShareModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+        petName={petName}
+        memorialId={id}
+        url={typeof window !== 'undefined' ? window.location.href : ''}
       />
 
       <style>{`
