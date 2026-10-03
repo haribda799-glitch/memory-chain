@@ -322,6 +322,14 @@ export default function MemorialPage() {
           </div>
         )}
 
+        {/* Private / Unlisted Banner */}
+        {parsedMemorial?.isPublic === false && (
+          <div className="w-full max-w-2xl bg-stone-100/90 border border-stone-300 rounded-2xl p-3.5 mb-6 text-center text-stone-700 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+            <span className="material-symbols-outlined text-stone-600 text-base">lock</span>
+            <span>Private / Unlisted Memorial (Hidden from public gallery)</span>
+          </div>
+        )}
+
         {/* Portrait & Header */}
         <div className="flex flex-col items-center text-center space-y-6 w-full max-w-2xl mx-auto mb-8">
           <div className="relative w-64 h-64 md:w-80 md:h-80 rounded-full overflow-hidden border-4 border-surface shadow-[0_8px_30px_rgb(0,0,0,0.12)] mx-auto">

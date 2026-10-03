@@ -400,10 +400,10 @@ export default function MemorialCard({
               <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
                 <div
                   className="px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md text-white/95 text-[11px] font-semibold flex items-center gap-1 shadow-md uppercase tracking-wider"
-                  title="Unlisted Memorial (Hidden from Gallery)"
+                  title="Private/Unlisted Memorial (Hidden from Public Gallery)"
                 >
                   <span className="material-symbols-outlined text-xs">lock</span>
-                  <span>Unlisted</span>
+                  <span>Private/Unlisted</span>
                 </div>
               </div>
             )}

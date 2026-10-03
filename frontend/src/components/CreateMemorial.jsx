@@ -1,14 +1,15 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { parseEther, formatEther } from 'viem';
+import { formatEther, decodeEventLog } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import {
   uploadToArweave, uploadJsonToArweave, buildNftMetadata,
 } from '../utils/arweave';
+import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
 
@@ -59,9 +60,41 @@ export default function CreateMemorial() {
   const [error, setError] = useState('');
   const [isMinting, setIsMinting] = useState(false);
   const [txHash, setTxHash] = useState(null);
+  const [mintedIsPublic, setMintedIsPublic] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
 
   const { writeContractAsync } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash });
+  const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
+
+  // Decode created memorial tokenId from transaction logs
+  const createdTokenId = useMemo(() => {
+    if (!receipt?.logs) return null;
+    for (const log of receipt.logs) {
+      try {
+        const decoded = decodeEventLog({
+          abi: CONTRACT_ABI,
+          data: log.data,
+          topics: log.topics,
+        });
+        if (decoded.eventName === 'MemorialCreated' && decoded.args?.tokenId !== undefined) {
+          return decoded.args.tokenId.toString();
+        }
+      } catch {
+        // Not this event
+      }
+    }
+    return null;
+  }, [receipt]);
+
+  // Handle transaction receipt error
+  useEffect(() => {
+    if (isReceiptError) {
+      setError('Transaction reverted on-chain. Please verify and try again.');
+      setTxHash(null);
+      setIsMinting(false);
+      setFlowStep(0);
+    }
+  }, [isReceiptError]);
 
   // Draft recovery state
   const [draft, setDraft] = useState(null);
@@ -231,6 +264,7 @@ export default function CreateMemorial() {
 
       setFlowStep(3);
       setIsMinting(true);
+      setMintedIsPublic(Boolean(isPublic));
       console.log('[CreateMemorial] Triggering writeContractAsync...');
 
       // Fetch latest creation fee dynamically to guarantee sending the exact amount required by the contract
@@ -254,6 +288,9 @@ export default function CreateMemorial() {
       });
 
       console.log('[CreateMemorial] Success Tx Hash:', hash);
+      // Immediately clear local draft upon receiving tx hash to prevent duplicate submissions
+      localStorage.removeItem('draft_memorial');
+      setDraft(null);
       setTxHash(hash);
     } catch (err) {
       console.error('[CreateMemorial] Minting error:', err);
@@ -264,7 +301,6 @@ export default function CreateMemorial() {
       }
       setError(`Minting failed: ${errMsg}`);
       alert(`Minting failed: ${errMsg}`);
-    } finally {
       setIsMinting(false);
       setFlowStep(0);
     }
@@ -273,6 +309,7 @@ export default function CreateMemorial() {
   /* ── Resume draft flow ─────────────────────────────────── */
   const handleResumeDraft = async (targetDraft = draft) => {
     if (!targetDraft || !targetDraft.metadataTxId) return;
+    if (isSubmitting) return; // Prevent double mint click
     if (!isConnected) { setError('Please connect your wallet first'); return; }
     if (!connector) {
       setError("Wallet connection failed. Please disable your adblocker or reconnect your wallet.");
@@ -301,6 +338,9 @@ export default function CreateMemorial() {
       setFlowStep(3);
       setIsMinting(true);
       if (targetDraft.petName) setPetName(targetDraft.petName);
+      const draftPublic = Boolean(targetDraft.isPublic ?? false);
+      setIsPublic(draftPublic);
+      setMintedIsPublic(draftPublic);
 
       // Fetch latest creation fee dynamically to guarantee sending the exact amount required by the contract
       let currentFee = creationFee;
@@ -315,7 +355,7 @@ export default function CreateMemorial() {
         address: contractAddress,
         abi: CONTRACT_ABI,
         functionName: 'create_memorial',
-        args: [targetDraft.petName, targetDraft.metadataTxId, targetDraft.isPublic ?? false],
+        args: [targetDraft.petName, targetDraft.metadataTxId, draftPublic],
         value: currentFee,
         account: userAddress,
         connector,
@@ -323,6 +363,9 @@ export default function CreateMemorial() {
       });
 
       console.log('[CreateMemorial] Resumed Tx Hash:', hash);
+      // Immediately clear local draft upon receiving tx hash to prevent duplicate submissions
+      localStorage.removeItem('draft_memorial');
+      setDraft(null);
       setTxHash(hash);
     } catch (err) {
       console.error('[CreateMemorial] Resume minting error:', err);
@@ -332,7 +375,6 @@ export default function CreateMemorial() {
         refetchCreationFee();
       }
       setError(`Minting failed: ${errMsg}`);
-    } finally {
       setIsMinting(false);
       setFlowStep(0);
     }
@@ -345,29 +387,104 @@ export default function CreateMemorial() {
 
   const isEOA = connector?.name && !connector.name.toLowerCase().includes('privy');
 
-  const isSubmitting = flowStep > 0 || isMinting || isConfirming;
+  const isSubmitting = flowStep > 0 || isMinting || isConfirming || (Boolean(txHash) && !isSuccess);
 
   /* ── Success screen ────────────────────────────────────── */
   if (isSuccess) {
+    const isPublicTribute = Boolean(mintedIsPublic);
+    const memorialTargetUrl = createdTokenId ? `/memorial/${createdTokenId}` : '/my';
+    const memorialShareUrl = createdTokenId
+      ? `${typeof window !== 'undefined' ? window.location.origin : ''}/#/memorial/${createdTokenId}`
+      : (typeof window !== 'undefined' ? window.location.href : '');
+
     return (
       <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
-        <div className="max-w-md text-center space-y-6">
-          <div className="w-20 h-20 rounded-full bg-[#ebddd5] flex items-center justify-center mx-auto">
-            <span className="material-symbols-outlined text-4xl text-[#8a4f36]" style={{ fontVariationSettings: "'FILL' 1" }}>favorite</span>
+        <div className="max-w-lg w-full text-center space-y-6 bg-white/80 backdrop-blur-sm border border-[#e0d0c7] p-8 md:p-10 rounded-[32px] shadow-sm animate-fadeIn">
+          <div className="w-20 h-20 rounded-full bg-[#ebddd5] flex items-center justify-center mx-auto shadow-inner text-[#8a4f36]">
+            <span className="material-symbols-outlined text-4xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+              favorite
+            </span>
           </div>
-          <h2 className="text-3xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
-            Memorial Created
-          </h2>
-          <p className="text-[#53433e]">
-            {petName}'s memory has been permanently recorded on the blockchain and preserved on Arweave.
-          </p>
-          <button
-            onClick={() => navigate('/')}
-            className="inline-flex items-center gap-2 bg-[#8a4f36] text-white px-8 py-3 rounded-2xl text-sm font-semibold uppercase tracking-wider hover:opacity-85 transition-opacity"
-          >
-            View Gallery
-          </button>
+
+          <div className="space-y-2">
+            <h2 className="text-3xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+              Memorial Created
+            </h2>
+            {petName && (
+              <p className="text-xs uppercase tracking-widest text-[#8a4f36] font-semibold">
+                For {petName}
+              </p>
+            )}
+          </div>
+
+          {isPublicTribute ? (
+            <p className="text-[#53433e] text-sm md:text-base leading-relaxed max-w-md mx-auto">
+              Memorial preserved on-chain! Your tribute is now visible in the public sanctuary.
+            </p>
+          ) : (
+            <div className="space-y-3 max-w-md mx-auto">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold uppercase tracking-wider">
+                <span className="material-symbols-outlined text-sm">lock</span>
+                <span>Private / Unlisted</span>
+              </div>
+              <p className="text-[#53433e] text-sm md:text-base leading-relaxed">
+                Memorial preserved on-chain! As a private tribute, it will not appear in the public gallery. Access is exclusive via direct link or QR code.
+              </p>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+            {isPublicTribute ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate(memorialTargetUrl)}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">visibility</span>
+                  <span>View Memorial</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/')}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 border border-[#d8c2ba] text-[#53433e] hover:bg-[#f5efe6] px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">explore</span>
+                  <span>Browse Gallery</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate(memorialTargetUrl)}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">arrow_forward</span>
+                  <span>Open Memorial</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowShareModal(true)}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 border border-[#d8c2ba] bg-[#fbf5f2] text-[#8a4f36] hover:bg-[#f3ebe4] hover:text-[#2C2520] px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider transition-colors shadow-xs cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">qr_code_2</span>
+                  <span>Share / Get QR Code</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
+
+        {/* Share Modal for Unlisted Memorial QR Code */}
+        <ShareModal
+          isOpen={showShareModal}
+          onClose={() => setShowShareModal(false)}
+          petName={petName}
+          memorialId={createdTokenId || ''}
+          url={memorialShareUrl}
+        />
       </div>
     );
   }
@@ -407,7 +524,7 @@ export default function CreateMemorial() {
         </div>
 
         {/* Draft recovery banner */}
-        {draft && !isSubmitting && (
+        {draft && (
           <div className="mb-6 bg-[#fffbf2] border border-[#e8d5b7] rounded-2xl p-4 md:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm animate-fadeIn">
             <div className="flex items-start gap-3">
               <span className="material-symbols-outlined text-[#8a4f36] text-2xl shrink-0 mt-0.5">restore_page</span>
@@ -422,18 +539,36 @@ export default function CreateMemorial() {
               <button
                 type="button"
                 onClick={handleDiscardDraft}
-                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-[#85736d] hover:bg-[#ebdcd1]/50 transition-colors"
+                disabled={isSubmitting}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-[#85736d] hover:bg-[#ebdcd1]/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Discard
               </button>
               <button
                 type="button"
                 onClick={() => handleResumeDraft(draft)}
-                disabled={isInsufficientFunds || isCreationPaused}
+                disabled={isSubmitting || isInsufficientFunds || isCreationPaused}
                 className="px-4 py-2 rounded-xl text-xs font-semibold uppercase tracking-wider bg-[#8a4f36] text-white hover:opacity-90 transition-opacity shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <span>{isCreationPaused ? 'Creation Paused' : isInsufficientFunds ? `Insufficient ETH (${formatEther(creationFee)} ETH required)` : 'Resume Minting'}</span>
-                {!isInsufficientFunds && !isCreationPaused && <span className="material-symbols-outlined text-sm">arrow_forward</span>}
+                {isSubmitting ? (
+                  <>
+                    <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>{isConfirming || txHash ? 'Confirming…' : 'Minting…'}</span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      {isCreationPaused
+                        ? 'Creation Paused'
+                        : isInsufficientFunds
+                          ? `Insufficient ETH (${formatEther(creationFee)} ETH required)`
+                          : 'Resume Minting'}
+                    </span>
+                    {!isInsufficientFunds && !isCreationPaused && (
+                      <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                    )}
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -679,14 +814,18 @@ export default function CreateMemorial() {
                 disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused}
                 className="w-full flex items-center justify-center gap-3 bg-[#d48c6f] text-white py-4 rounded-2xl text-sm font-semibold tracking-wider uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isSubmitting
-                  ? <><span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Processing…</>
-                  : isCreationPaused
-                    ? <><span>Memorial Creation Paused</span></>
-                    : isInsufficientFunds
-                      ? <><span>Insufficient ETH Balance ({formatEther(creationFee)} ETH required)</span></>
-                      : <><span>Preserve Forever ({formatEther(creationFee)} ETH)</span><span className="material-symbols-outlined text-base">arrow_forward</span></>
-                }
+                {isSubmitting ? (
+                  <>
+                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>{isConfirming || txHash ? 'Confirming on-chain…' : 'Minting…'}</span>
+                  </>
+                ) : isCreationPaused ? (
+                  <><span>Memorial Creation Paused</span></>
+                ) : isInsufficientFunds ? (
+                  <><span>Insufficient ETH Balance ({formatEther(creationFee)} ETH required)</span></>
+                ) : (
+                  <><span>Preserve Forever ({formatEther(creationFee)} ETH)</span><span className="material-symbols-outlined text-base">arrow_forward</span></>
+                )}
               </button>
             </form>
           </div>
