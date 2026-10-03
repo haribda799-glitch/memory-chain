@@ -4,6 +4,10 @@
 // MOCK_MODE = true  → instant fake txIds, no network required
 // MOCK_MODE = false → real ArLocal (DEV) or arweave.net (PROD)
 //
+// Automatic fallback: if ArConnect is missing (PROD) or ArLocal is
+// unreachable (DEV), uploads silently switch to local mock storage
+// (console warning only) so MetaMask / Privy users can still mint.
+//
 // DEV (ArLocal) upload flow:
 //   1. Generate a fresh JWK wallet
 //   2. Mint 10 000 AR of test tokens via /mint endpoint
@@ -12,7 +16,7 @@
 //   5. Mine the block via /mine
 //   6. Confirm tx status (throw on failure)
 //
-// Any throw cancels the entire mint flow in CreateMemorial.jsx
+// Any throw from a real upload cancels the mint flow in CreateMemorial.jsx
 // ============================================================
 
 import Arweave from 'arweave';
@@ -25,30 +29,134 @@ export const arweave = ArweaveClass.init({
   protocol: import.meta.env.DEV ? 'http' : 'https',
 });
 
-export const MOCK_MODE = false; // Set true to skip real uploads
+export const MOCK_MODE = false; // Set true to force mock uploads (no network required)
 
 const ARWEAVE_GATEWAY = import.meta.env.DEV
   ? 'http://127.0.0.1:1984'
   : 'https://arweave.net';
 
+// ── Mock storage (graceful fallback) ─────────────────────────
+// Used automatically when MOCK_MODE is on, ArConnect is missing (PROD),
+// or ArLocal is unreachable (DEV). Mock IDs are `mock_` + 38 chars = 43 chars,
+// which fits the contract's `arweave_uri: String[64]` limit.
+// Metadata JSON is persisted in localStorage and served back as a data: URL
+// by getArweaveUrl(), so the creator's browser renders photo + story normally.
+const MOCK_PREFIX = 'mock_';
+const MOCK_STORAGE_PREFIX = 'mc_mock_ar_';
+const mockMemoryStore = new Map(); // mockId → data URL / JSON string (session cache)
+
+export function isMockTxId(txId) {
+  return typeof txId === 'string' && txId.startsWith(MOCK_PREFIX);
+}
+
+function jsonToDataUrl(json) {
+  return `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
+}
+
+const MOCK_PLACEHOLDER_METADATA = JSON.stringify({
+  name: 'Memorial',
+  description:
+    'This memorial was created on testnet with temporary storage. Its photo and story are only available on the device where it was created.',
+  image: '',
+  attributes: [],
+});
+
+function resolveMockUrl(txId) {
+  let stored = mockMemoryStore.get(txId);
+  if (!stored && typeof window !== 'undefined' && window.localStorage) {
+    try {
+      stored = window.localStorage.getItem(`${MOCK_STORAGE_PREFIX}${txId}`);
+    } catch {
+      stored = null;
+    }
+  }
+  if (!stored) return jsonToDataUrl(MOCK_PLACEHOLDER_METADATA);
+  return stored.startsWith('data:') ? stored : jsonToDataUrl(stored);
+}
+
 /**
- * Returns a full HTTP gateway URL for an Arweave transaction ID.
+ * Returns a fetchable URL for an Arweave transaction ID.
+ * Mock IDs resolve to a local data: URL instead of the gateway.
  */
 export function getArweaveUrl(txId) {
   if (!txId) return '';
+  if (isMockTxId(txId)) return resolveMockUrl(txId);
   return `${ARWEAVE_GATEWAY}/${txId}`;
 }
 
 /**
- * Generate a random mock transaction ID (43 chars base64url).
+ * Generate a random mock transaction ID (43 chars, `mock_` prefixed).
  */
 function generateMockTxId() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  let result = '';
-  for (let i = 0; i < 43; i++) {
+  let result = MOCK_PREFIX;
+  for (let i = 0; i < 43 - MOCK_PREFIX.length; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
+}
+
+/**
+ * Decide once per session whether real Arweave uploads are possible.
+ * Never throws — falls back to 'mock' with a console warning.
+ *
+ * @returns {Promise<'arweave'|'mock'>}
+ */
+let storageModePromise = null;
+export function resolveStorageMode() {
+  if (!storageModePromise) {
+    storageModePromise = (async () => {
+      if (MOCK_MODE) {
+        console.warn('[Arweave] MOCK_MODE enabled — using mock storage.');
+        return 'mock';
+      }
+      if (import.meta.env.DEV) {
+        try {
+          const res = await arweave.api.get('/info');
+          if (res.status === 200) return 'arweave';
+          console.warn(`[ArLocal] /info returned HTTP ${res.status} — falling back to mock storage.`);
+        } catch (err) {
+          console.warn('[ArLocal] Not reachable on port 1984 — falling back to mock storage.', err?.message || err);
+        }
+        return 'mock';
+      }
+      if (typeof window === 'undefined' || !window.arweaveWallet) {
+        console.warn('[Arweave] ArConnect extension not found — falling back to mock storage (testnet).');
+        return 'mock';
+      }
+      return 'arweave';
+    })();
+  }
+  return storageModePromise;
+}
+
+/**
+ * Downscale an image File to a compact JPEG data URL (fits localStorage).
+ * Resolves '' if the file can't be processed.
+ */
+async function fileToCompactDataUrl(file, maxSide = 640, quality = 0.82) {
+  if (!file || typeof document === 'undefined') return '';
+  if (file.type?.startsWith('image/')) {
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = objectUrl;
+      });
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(objectUrl);
+      return canvas.toDataURL('image/jpeg', quality);
+    } catch (err) {
+      console.warn('[MOCK] Image compression failed:', err);
+    }
+  }
+  return '';
 }
 
 /**
@@ -71,9 +179,10 @@ async function getSigningKey() {
     return jwk;
   }
 
-  // PROD: ArConnect browser extension handles signing
-  if (!window.arweaveWallet) {
-    throw new Error('ArConnect extension not found. Install ArConnect or set MOCK_MODE = true.');
+  // PROD: ArConnect browser extension handles signing.
+  // resolveStorageMode() routes to mock storage before we get here if it's missing.
+  if (typeof window === 'undefined' || !window.arweaveWallet) {
+    throw new Error('[Arweave] ArConnect extension not available for signing.');
   }
   return 'use_wallet';
 }
@@ -119,17 +228,21 @@ async function uploadAndVerify(tx) {
 
 /**
  * Upload a file (image/video) to Arweave.
- * Throws on any failure — this will cancel the entire mint flow.
+ * Falls back to mock storage (never throws for missing ArConnect / ArLocal).
  *
  * @param {File} file - The file to upload
  * @param {Object[]} extraTags - Optional extra Arweave tags [{name, value}]
- * @returns {Promise<string>} Arweave transaction ID
+ * @returns {Promise<string>} Arweave transaction ID (or `mock_…` ID)
  */
 export async function uploadToArweave(file, extraTags = []) {
-  if (MOCK_MODE) {
-    await new Promise((r) => setTimeout(r, 1500));
+  const mode = await resolveStorageMode();
+  if (mode === 'mock') {
     const mockTxId = generateMockTxId();
-    console.log('[MOCK] Uploaded file to Arweave:', mockTxId);
+    // Kept in memory only; buildNftMetadata() embeds it into the metadata JSON,
+    // which is what gets persisted (avoids storing the image twice).
+    const dataUrl = await fileToCompactDataUrl(file);
+    if (dataUrl) mockMemoryStore.set(mockTxId, dataUrl);
+    console.log('[MOCK] Stored file locally:', mockTxId, dataUrl ? `(${(dataUrl.length / 1024).toFixed(1)} KB)` : '(no preview)');
     return mockTxId;
   }
 
@@ -164,10 +277,24 @@ export async function uploadToArweave(file, extraTags = []) {
  * @returns {Promise<string>} Arweave transaction ID
  */
 export async function uploadJsonToArweave(metadata) {
-  if (MOCK_MODE) {
-    await new Promise((r) => setTimeout(r, 1000));
+  const mode = await resolveStorageMode();
+  if (mode === 'mock') {
     const mockTxId = generateMockTxId();
-    console.log('[MOCK] Uploaded metadata to Arweave:', mockTxId, metadata);
+    let json = JSON.stringify(metadata);
+    mockMemoryStore.set(mockTxId, json);
+    try {
+      window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}${mockTxId}`, json);
+    } catch (err) {
+      // Quota exceeded (large image) — persist the text metadata without the photo
+      console.warn('[MOCK] localStorage quota exceeded, storing metadata without image:', err?.name || err);
+      json = JSON.stringify({ ...metadata, image: '' });
+      try {
+        window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}${mockTxId}`, json);
+      } catch (err2) {
+        console.warn('[MOCK] Could not persist metadata; it will be available for this session only.', err2);
+      }
+    }
+    console.log('[MOCK] Stored metadata locally:', mockTxId, metadata);
     return mockTxId;
   }
 
@@ -243,9 +370,11 @@ export function buildNftMetadata({
     ? passingYear.toString()
     : (memorialDate ? new Date(memorialDate).getFullYear().toString() : '');
 
-  const imageUrl = imageTxId
-    ? (import.meta.env.DEV ? `${ARWEAVE_GATEWAY}/${imageTxId}` : `ar://${imageTxId}`)
-    : '';
+  const imageUrl = !imageTxId
+    ? ''
+    : isMockTxId(imageTxId)
+      ? (mockMemoryStore.get(imageTxId) || '')
+      : (import.meta.env.DEV ? `${ARWEAVE_GATEWAY}/${imageTxId}` : `ar://${imageTxId}`);
 
   const metadata = {
     name: `Memorial: ${petName}`,
@@ -278,7 +407,7 @@ export function buildNftMetadata({
     ],
   };
 
-  if (videoTxId) {
+  if (videoTxId && !isMockTxId(videoTxId)) {
     metadata.animation_url = import.meta.env.DEV
       ? `${ARWEAVE_GATEWAY}/${videoTxId}`
       : `ar://${videoTxId}`;
