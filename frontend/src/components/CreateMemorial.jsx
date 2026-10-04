@@ -25,7 +25,8 @@ const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compress
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
 const THUMBNAIL_MAX_DIMENSION = 500;          // px, max dimension for fast initial thumbnail
 const THUMBNAIL_QUALITY = 0.75;               // fast preview quality
-const AI_CHECK_TIMEOUT_MS = 3000;             // AI check must never block longer than this
+const AI_CHECK_COLD_TIMEOUT_MS = 12000;       // 12s timeout for cold start while models download
+const AI_CHECK_WARM_TIMEOUT_MS = 4000;        // 4s timeout for warm start once models are cached
 
 /**
  * Fast lightweight thumbnail generation (<= 500px, JPEG 0.75 Data URL) for instant zero-lag preview.
@@ -50,7 +51,16 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
       height = bitmap.height;
       cleanup = () => bitmap.close?.();
     } catch {
-      source = null;
+      // Android Chrome or mobile WebViews can fail when options dictionary is provided
+      try {
+        const bitmap = await createImageBitmap(file);
+        source = bitmap;
+        width = bitmap.width;
+        height = bitmap.height;
+        cleanup = () => bitmap.close?.();
+      } catch {
+        source = null;
+      }
     }
   }
 
@@ -67,9 +77,29 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
       width = img.naturalWidth;
       height = img.naturalHeight;
       cleanup = () => URL.revokeObjectURL(url);
-    } catch (e) {
+    } catch {
       URL.revokeObjectURL(url);
-      throw e;
+      // Fallback via FileReader readAsDataURL if blob ObjectURL decoding failed
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = reject;
+          img.src = dataUrl;
+        });
+        source = img;
+        width = img.naturalWidth;
+        height = img.naturalHeight;
+        cleanup = () => {};
+      } catch {
+        return null;
+      }
     }
   }
 
@@ -129,7 +159,15 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
         height = bitmap.height;
         cleanup = () => bitmap.close?.();
       } catch {
-        source = null;
+        try {
+          const bitmap = await createImageBitmap(file);
+          source = bitmap;
+          width = bitmap.width;
+          height = bitmap.height;
+          cleanup = () => bitmap.close?.();
+        } catch {
+          source = null;
+        }
       }
     }
 
@@ -193,6 +231,7 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
 let tfModulePromise = null;
+let isAiWarm = false;
 
 async function getTf() {
   if (!tfModulePromise) {
@@ -211,8 +250,8 @@ function resetAiModeration() {
       }
     }).catch(() => {});
   }
-  cachedFaceModelPromise = null;
-  cachedObjectModelPromise = null;
+  // DO NOT wipe cachedFaceModelPromise or cachedObjectModelPromise here.
+  // Models are statically loaded once per session to prevent repeated ~20MB downloads.
 }
 
 async function getFaceModel() {
@@ -233,6 +272,15 @@ async function getObjectModel() {
     })();
   }
   return cachedObjectModelPromise;
+}
+
+async function preloadAiModels() {
+  try {
+    await Promise.all([getFaceModel(), getObjectModel()]);
+    isAiWarm = true;
+  } catch (e) {
+    console.warn('[AI Preload] Background warmup note:', e);
+  }
 }
 
 export default function CreateMemorial() {
@@ -264,7 +312,6 @@ export default function CreateMemorial() {
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewFailed, setPreviewFailed] = useState(false);
-  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
 
   // AI Verification State (informational only — never blocks the wizard)
@@ -291,9 +338,33 @@ export default function CreateMemorial() {
 
   // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
   const previewUrlRef = useRef('');
+  const thumbUrlRef = useRef('');
+  const objectUrlFailedRef = useRef(false);
+  const isGeneratingThumbnailRef = useRef(false);
+
+  // Background warmup of AI models on component mount
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        window.requestIdleCallback(() => {
+          if (!cancelled) preloadAiModels();
+        }, { timeout: 4000 });
+      } else {
+        preloadAiModels();
+      }
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
-      if (previewUrlRef.current) {
+      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current);
         previewUrlRef.current = '';
       }
@@ -303,16 +374,18 @@ export default function CreateMemorial() {
 
   const handleRemoveImage = useCallback(() => {
     analysisRunIdRef.current += 1;
-    if (previewUrlRef.current) {
+    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrlRef.current);
-      previewUrlRef.current = '';
     }
+    previewUrlRef.current = '';
+    thumbUrlRef.current = '';
+    objectUrlFailedRef.current = false;
+    isGeneratingThumbnailRef.current = false;
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
     setPreviewFailed(false);
     setError(null);
-    setIsGeneratingPreview(false);
     setIsAnalyzingImage(false);
     setCheckStatus('idle');
     setDetectedPerson(false);
@@ -372,13 +445,15 @@ export default function CreateMemorial() {
     setDescription('');
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
-    if (previewUrlRef.current) {
+    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrlRef.current);
-      previewUrlRef.current = '';
     }
+    previewUrlRef.current = '';
+    thumbUrlRef.current = '';
+    objectUrlFailedRef.current = false;
+    isGeneratingThumbnailRef.current = false;
     setPreviewUrl('');
     setPreviewFailed(false);
-    setIsGeneratingPreview(false);
     setIsPublic(false);
     setIsAnalyzingImage(false);
     setCheckStatus('idle');
@@ -419,13 +494,15 @@ export default function CreateMemorial() {
       analysisRunIdRef.current += 1;
       if (fileInputRef.current) fileInputRef.current.value = '';
       setPhoto(null);
-      if (previewUrlRef.current) {
+      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current);
-        previewUrlRef.current = '';
       }
+      previewUrlRef.current = '';
+      thumbUrlRef.current = '';
+      objectUrlFailedRef.current = false;
+      isGeneratingThumbnailRef.current = false;
       setPreviewUrl('');
       setPreviewFailed(false);
-      setIsGeneratingPreview(false);
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
       setError(null);
@@ -452,7 +529,7 @@ export default function CreateMemorial() {
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
   /* ── Non-blocking AI image check ───────────────────────────
-   * Runs on a small compressed copy. Resolves with
+   * Runs on a small compressed copy or thumbnail. Resolves with
    * { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
   const runAiCheck = useCallback(async (imageUrl) => {
     const tf = await getTf();
@@ -473,7 +550,6 @@ export default function CreateMemorial() {
         const faceModel = await getFaceModel();
         faces = await faceModel.estimateFaces(img, false);
       } catch (faceErr) {
-        cachedFaceModelPromise = null;
         console.warn('[AI Analysis] Face detection warning:', faceErr);
       }
 
@@ -481,7 +557,6 @@ export default function CreateMemorial() {
         const objectModel = await getObjectModel();
         predictions = await objectModel.detect(img);
       } catch (objErr) {
-        cachedObjectModelPromise = null;
         console.warn('[AI Analysis] Object detection warning:', objErr);
       } finally {
         tf.engine().endScope();
@@ -499,61 +574,38 @@ export default function CreateMemorial() {
     }
   }, []);
 
-  /* Background pipeline: safe resize (canvas, max 1000px, quality 0.8) → delayed AI check.
-   * The lightweight thumbnail preview is already on screen; nothing here blocks the UI. */
+  /* Background AI verification pipeline: runs with dynamic timeout (cold: 12s, warm: 4s).
+   * Fast preview is already on screen; nothing here blocks the UI. */
   const processSelectedImage = useCallback(async (file, thumbDataUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     let tempUrl = null;
     try {
-      // 1. Give the browser 250ms to finish rendering the thumbnail in DOM & flush microtasks
-      await new Promise((resolve) => setTimeout(resolve, 250));
       if (!isCurrent()) return;
 
-      // 2. Safe background compression
-      let imageToAnalyze = file;
-      try {
-        const compressed = await Promise.race([
-          resizeImage(file, 1000, 1000, COMPRESSION_QUALITY),
-          new Promise((resolve) => setTimeout(() => resolve(file), 5000)),
-        ]);
-        if (!isCurrent()) return;
-        if (compressed && compressed !== file) {
-          setPhoto(compressed);
-          imageToAnalyze = compressed;
-        }
-      } catch (compErr) {
-        console.warn('[CreateMemorial] Safe resize error, using fallback:', compErr);
-      }
-
-      if (!isCurrent()) return;
-
-      // 3. Separation in time: delay before TensorFlow WebGL loads weights to prevent GPU competition
-      await new Promise((resolve) => {
-        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-          window.requestIdleCallback(() => setTimeout(resolve, 150), { timeout: 800 });
-        } else {
-          setTimeout(resolve, 250);
-        }
-      });
-      if (!isCurrent()) return;
-
-      // 4. Run AI verification using fast 500px thumbnail or compressed image
+      // Use fast thumbnail if available; otherwise use current objectUrl or create a temp one
       let aiUrl = thumbDataUrl;
       if (!aiUrl) {
-        tempUrl = URL.createObjectURL(imageToAnalyze);
-        aiUrl = tempUrl;
+        if (previewUrlRef.current) {
+          aiUrl = previewUrlRef.current;
+        } else {
+          tempUrl = URL.createObjectURL(file);
+          aiUrl = tempUrl;
+        }
       }
+
+      const timeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
 
       const result = await Promise.race([
         runAiCheck(aiUrl).catch((err) => {
           console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
           return null;
         }),
-        new Promise((resolve) => setTimeout(() => resolve(null), AI_CHECK_TIMEOUT_MS)),
+        new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
       ]);
       if (!isCurrent()) return;
 
       if (result) {
+        isAiWarm = true;
         setDetectedPerson(result.hasPerson);
         setDetectedAnimal(result.hasAnimal);
         setCheckStatus('accepted');
@@ -574,13 +626,22 @@ export default function CreateMemorial() {
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
 
-    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name || '');
+    const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
+    if (isHeic) {
+      setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
+      setPreviewFailed(true);
+      return;
+    }
+
+    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.name || '');
     if (!looksLikeImage) {
       setError('Please select a valid image file (JPG, PNG, or WebP)');
+      setPreviewFailed(true);
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
+      setPreviewFailed(true);
       return;
     }
 
@@ -588,57 +649,93 @@ export default function CreateMemorial() {
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
 
-    setPhoto(file);
+    // Reset error & states
     setError(null);
+    setPhoto(file);
     setPreviewFailed(false);
-    setIsGeneratingPreview(true);
+    objectUrlFailedRef.current = false;
+    thumbUrlRef.current = '';
 
     // Reset previous check results
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-    setCheckStatus('idle');
-
-    // 1) Fast lightweight thumbnail generation (Thumbnail First)
-    let thumbDataUrl = null;
-    try {
-      thumbDataUrl = await generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY);
-    } catch (thumbErr) {
-      console.warn('[CreateMemorial] Thumbnail generation failed:', thumbErr);
-    } finally {
-      if (isCurrent()) {
-        setIsGeneratingPreview(false);
-      }
-    }
-
-    if (!isCurrent()) return;
-
-    if (thumbDataUrl) {
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current);
-        previewUrlRef.current = '';
-      }
-      setPreviewUrl(thumbDataUrl);
-    } else {
-      // Fallback to direct object URL
-      const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
-      if (isHeic) {
-        setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
-      } else {
-        const objectUrl = URL.createObjectURL(file);
-        if (previewUrlRef.current) {
-          URL.revokeObjectURL(previewUrlRef.current);
-        }
-        previewUrlRef.current = objectUrl;
-        setPreviewUrl(objectUrl);
-      }
-    }
-
-    // 2) Run background compression and delayed AI check
     setCheckStatus('checking');
     setIsAnalyzingImage(true);
-    processSelectedImage(file, thumbDataUrl, runId);
+
+    // 1) Instant Zero-Wait Preview: synchronously create Object URL
+    const objectUrl = URL.createObjectURL(file);
+    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+    previewUrlRef.current = objectUrl;
+    setPreviewUrl(objectUrl);
+
+    // 2) Generate lightweight thumbnail concurrently in background
+    isGeneratingThumbnailRef.current = true;
+    generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY)
+      .then((thumbDataUrl) => {
+        if (!isCurrent()) return;
+        isGeneratingThumbnailRef.current = false;
+
+        if (thumbDataUrl) {
+          thumbUrlRef.current = thumbDataUrl;
+          // Switch to lightweight thumbnail DataURL for memory efficiency
+          setPreviewUrl(thumbDataUrl);
+          setPreviewFailed(false);
+        } else if (objectUrlFailedRef.current) {
+          setPreviewFailed(true);
+        }
+
+        // Run AI verification on lightweight thumbnail or objectUrl
+        processSelectedImage(file, thumbDataUrl, runId);
+      })
+      .catch((thumbErr) => {
+        console.warn('[CreateMemorial] Thumbnail generation error:', thumbErr);
+        if (!isCurrent()) return;
+        isGeneratingThumbnailRef.current = false;
+        if (objectUrlFailedRef.current) {
+          setPreviewFailed(true);
+        }
+        processSelectedImage(file, null, runId);
+      });
+
+    // 3) Background safe compression for Arweave payload (never blocks preview or UI)
+    resizeImage(file, 1000, 1000, COMPRESSION_QUALITY)
+      .then((compressed) => {
+        if (isCurrent() && compressed && compressed !== file) {
+          setPhoto(compressed);
+        }
+      })
+      .catch((compErr) => {
+        console.warn('[CreateMemorial] Background compression note:', compErr);
+      });
   }, [processSelectedImage]);
+
+  const handleImageError = useCallback(() => {
+    // If currently rendering DataURL and ObjectURL exists, try ObjectURL
+    if (previewUrl && previewUrl.startsWith('data:') && previewUrlRef.current) {
+      console.warn('[CreateMemorial] DataURL preview failed, falling back to ObjectURL');
+      setPreviewUrl(previewUrlRef.current);
+      return;
+    }
+    // If currently rendering ObjectURL
+    if (previewUrl && previewUrl.startsWith('blob:')) {
+      objectUrlFailedRef.current = true;
+      // If thumbnail is already ready, switch to it immediately
+      if (thumbUrlRef.current) {
+        console.warn('[CreateMemorial] ObjectURL preview failed, falling back to Thumbnail DataURL');
+        setPreviewUrl(thumbUrlRef.current);
+        return;
+      }
+      // If thumbnail is still being generated, do not fail yet
+      if (isGeneratingThumbnailRef.current) {
+        console.warn('[CreateMemorial] ObjectURL preview failed, waiting for background thumbnail...');
+        return;
+      }
+    }
+    setPreviewFailed(true);
+  }, [previewUrl]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -1087,23 +1184,22 @@ export default function CreateMemorial() {
                 type="file"
                 accept="image/*"
                 className="hidden"
-                onChange={(e) => {
-                  handlePhotoSelect(e.target.files?.[0]);
-                  // allow re-selecting the same file later
+                onClick={(e) => {
                   e.target.value = '';
                 }}
+                onChange={(e) => {
+                  handlePhotoSelect(e.target.files?.[0]);
+                }}
               />
-              {isGeneratingPreview ? (
-                <div className="w-full h-56 rounded-2xl border border-amber-900/10 bg-[#fbf9f6] flex flex-col items-center justify-center gap-3 animate-fadeIn">
-                  <span className="inline-block w-6 h-6 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                  <span className="text-xs font-medium text-[#8a4f36]">Preparing photo…</span>
-                </div>
-              ) : previewUrl ? (
+              {previewUrl ? (
                 <div className="space-y-3">
                   {previewFailed ? (
                     <div
                       className="w-full h-56 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex flex-col items-center justify-center p-4 cursor-pointer hover:bg-[#f5efe6] transition-colors relative"
-                      onClick={() => fileInputRef.current?.click()}
+                      onClick={() => {
+                        if (fileInputRef.current) fileInputRef.current.value = '';
+                        fileInputRef.current?.click();
+                      }}
                     >
                       <span className="material-symbols-outlined text-4xl text-[#8a4f36] mb-1">image</span>
                       <p className="text-sm font-medium text-[#1b1c1a] truncate max-w-xs">{photo?.name || 'Photo selected'}</p>
@@ -1126,7 +1222,7 @@ export default function CreateMemorial() {
                         src={previewUrl}
                         alt="Pet Portrait Preview"
                         className="w-full h-full object-cover"
-                        onError={() => setPreviewFailed(true)}
+                        onError={handleImageError}
                       />
                       <button
                         type="button"
@@ -1208,7 +1304,10 @@ export default function CreateMemorial() {
                   onDrop={handleDrop}
                   onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-[#8a4f36]'); }}
                   onDragLeave={(e) => e.currentTarget.classList.remove('border-[#8a4f36]')}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => {
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                    fileInputRef.current?.click();
+                  }}
                 >
                   <span className="material-symbols-outlined text-4xl text-[#d8c2ba] group-hover:text-[#8a4f36] transition-colors mb-2">add_photo_alternate</span>
                   <p className="text-sm text-[#53433e]">Click or drag photo to upload</p>
