@@ -161,23 +161,6 @@ export default function CreateMemorial() {
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
-  // Current preview object URL, kept in a ref so it can always be revoked
-  const previewUrlRef = useRef('');
-  useEffect(() => () => {
-    analysisRunIdRef.current += 1;
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current);
-      previewUrlRef.current = '';
-    }
-  }, []);
-
-  const revokePreviewUrl = useCallback(() => {
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current);
-      previewUrlRef.current = '';
-    }
-  }, []);
-
   const { writeContractAsync } = useWriteContract();
   const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
 
@@ -228,7 +211,6 @@ export default function CreateMemorial() {
     setPassingYear('');
     setDescription('');
     setPhoto(null);
-    revokePreviewUrl();
     setPreviewUrl('');
     setIsPublic(false);
     setIsAnalyzingImage(false);
@@ -245,7 +227,7 @@ export default function CreateMemorial() {
     setShowShareModal(false);
     const fileInput = document.getElementById('photo-input');
     if (fileInput) fileInput.value = '';
-  }, [revokePreviewUrl]);
+  }, []);
 
   // Initialize clean state and check for saved draft on mount
   useEffect(() => {
@@ -270,13 +252,12 @@ export default function CreateMemorial() {
       setDraft(null);
       analysisRunIdRef.current += 1;
       setPhoto(null);
-      revokePreviewUrl();
       setPreviewUrl('');
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
       setError('');
     }
-  }, [isSuccess, revokePreviewUrl]);
+  }, [isSuccess]);
 
   // Read creation_fee from contract
   const { data: creationFeeRaw, refetch: refetchCreationFee } = useReadContract({
@@ -382,15 +363,24 @@ export default function CreateMemorial() {
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
 
-    // 1) Zero-wait preview: show the file immediately, before any processing
-    const objectUrl = URL.createObjectURL(file);
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = objectUrl;
-    setPreviewUrl(objectUrl);
     setPhoto(file);
     setError('');
 
-    // 2) Reset previous check results, then run the heavy work in the background
+    // Robust base64 Data URL generation
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result;
+      if (typeof dataUrl === 'string') {
+        setPreviewUrl(dataUrl);
+      }
+    };
+    reader.onerror = (err) => {
+      console.error('[CreateMemorial] FileReader failed:', err);
+      setError('Failed to load image preview');
+    };
+    reader.readAsDataURL(file);
+
+    // Reset previous check results, then run background compression & non-blocking AI check
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
@@ -851,13 +841,13 @@ export default function CreateMemorial() {
                   e.target.value = '';
                 }}
               />
-              {previewUrl ? (
+              {Boolean(previewUrl && typeof previewUrl === 'string') ? (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden">
                     <img
                       src={previewUrl}
-                      alt="Preview"
-                      className="w-full max-h-64 object-cover"
+                      alt="Pet preview"
+                      className="w-full h-48 object-cover rounded-xl"
                       onError={(e) => console.error('Image preview failed to load:', e)}
                     />
                     <button
@@ -865,7 +855,6 @@ export default function CreateMemorial() {
                       onClick={() => {
                         analysisRunIdRef.current += 1;
                         setPhoto(null);
-                        revokePreviewUrl();
                         setPreviewUrl('');
                         setIsAnalyzingImage(false);
                         setCheckStatus('idle');
@@ -1023,7 +1012,14 @@ export default function CreateMemorial() {
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
-              {previewUrl && <img src={previewUrl} alt="Preview" className="w-full max-h-48 object-cover rounded-xl" />}
+              {Boolean(previewUrl && typeof previewUrl === 'string') && (
+                <img
+                  src={previewUrl}
+                  alt="Pet preview"
+                  className="w-full max-h-48 object-cover rounded-xl"
+                  onError={(e) => console.error('Review image preview failed to load:', e)}
+                />
+              )}
               <div className="space-y-2 text-sm text-[#53433e]">
                 <p><span className="font-semibold text-[#1b1c1a]">Name:</span> {petName || '—'}</p>
                 {species && <p><span className="font-semibold text-[#1b1c1a]">Species:</span> {species}{breed ? ` · ${breed}` : ''}</p>}
