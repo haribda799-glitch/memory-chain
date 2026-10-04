@@ -23,14 +23,16 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
-const AI_CHECK_MAX_TIMEOUT_MS = 3500;        // 3.5s max timeout for fast, seamless verification
+const AI_CHECK_COLD_TIMEOUT_MS = 15000;       // 15s timeout for cold start while models download
+const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once models are cached
 
 const THUMBNAIL_MAX_DIM = 800;
 const THUMBNAIL_QUALITY = 0.85;
 
 /**
  * Universal proportional thumbnail generator (Data URL max 800px).
- * Safely downsamples on mobile without allocating full 50MP uncompressed bitmaps in GPU memory.
+ * Safely downsamples on mobile without allocating full 50MP uncompressed bitmaps in GPU memory,
+ * and maintains natural aspect ratio via WHATWG single-dimension scaling.
  */
 async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THUMBNAIL_QUALITY) {
   if (!file) return null;
@@ -41,61 +43,53 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
   );
   if (!isImage || file.type === 'image/gif') return null;
 
-  // 1. Probe natural dimensions safely via lightweight Image + ObjectURL
-  // Browser parses image header dimensions without keeping full uncompressed bitmap in RAM
-  let origW = 0;
-  let origH = 0;
-  const probeUrl = URL.createObjectURL(file);
-  const probeImg = new Image();
-  try {
-    await new Promise((resolve, reject) => {
-      probeImg.onload = resolve;
-      probeImg.onerror = reject;
-      probeImg.src = probeUrl;
-    });
-    origW = probeImg.naturalWidth || probeImg.width;
-    origH = probeImg.naturalHeight || probeImg.height;
-  } catch (probeErr) {
-    console.warn('[CreateMemorial] Probe dimension note:', probeErr);
-  } finally {
-    probeImg.onload = null;
-    probeImg.onerror = null;
-    probeImg.src = '';
-    URL.revokeObjectURL(probeUrl);
-  }
-
-  // Calculate proportional dimensions
-  let targetW = maxDim;
-  let targetH = maxDim;
-  if (origW > 0 && origH > 0) {
-    const scale = Math.min(1, maxDim / Math.max(origW, origH));
-    targetW = Math.max(1, Math.round(origW * scale));
-    targetH = Math.max(1, Math.round(origH * scale));
-  }
-
-  // Tier 1: Hardware-accelerated downsampling on decode via createImageBitmap (Chrome Android, Desktop)
+  // Tier 1: Hardware-accelerated DCT downsampling on decode via createImageBitmap (Chrome Android, Desktop)
   if (typeof createImageBitmap === 'function') {
     try {
-      const resizedBitmap = await createImageBitmap(file, {
-        resizeWidth: targetW,
-        resizeHeight: targetH,
-        resizeQuality: 'medium',
-      });
+      let bmp = null;
+      try {
+        bmp = await createImageBitmap(file, {
+          resizeWidth: maxDim,
+          resizeQuality: 'medium',
+          imageOrientation: 'from-image',
+        });
+      } catch {
+        bmp = await createImageBitmap(file, {
+          resizeWidth: maxDim,
+          resizeQuality: 'medium',
+        });
+      }
+
+      // If image is excessively tall portrait (panorama), constrain by height instead
+      if (bmp.height > 1200) {
+        try {
+          const tallBmp = await createImageBitmap(file, {
+            resizeHeight: maxDim,
+            resizeQuality: 'medium',
+            imageOrientation: 'from-image',
+          });
+          bmp.close?.();
+          bmp = tallBmp;
+        } catch {
+          // Keep current bmp if height resize fails
+        }
+      }
+
       const canvas = document.createElement('canvas');
-      canvas.width = targetW;
-      canvas.height = targetH;
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, targetW, targetH);
-        ctx.drawImage(resizedBitmap, 0, 0, targetW, targetH);
-        resizedBitmap.close?.();
+        ctx.fillRect(0, 0, bmp.width, bmp.height);
+        ctx.drawImage(bmp, 0, 0);
+        bmp.close?.();
         const dataUrl = canvas.toDataURL('image/jpeg', quality);
         canvas.width = 0;
         canvas.height = 0;
         if (dataUrl && dataUrl.length > 50) return dataUrl;
       }
-      resizedBitmap.close?.();
+      bmp.close?.();
     } catch {
       // Fall through to Tier 2 (e.g. iOS Safari where options dictionary throws)
     }
@@ -103,16 +97,22 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
 
   // Tier 2: Universal Canvas fallback using loaded Image (iOS Safari)
   try {
-    const tempUrl = URL.createObjectURL(file);
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
     const canvasImg = new Image();
     await new Promise((resolve, reject) => {
       canvasImg.onload = resolve;
       canvasImg.onerror = reject;
-      canvasImg.src = tempUrl;
+      canvasImg.src = dataUrl;
     });
 
-    const actualW = canvasImg.naturalWidth || canvasImg.width || targetW;
-    const actualH = canvasImg.naturalHeight || canvasImg.height || targetH;
+    const actualW = canvasImg.naturalWidth || canvasImg.width || maxDim;
+    const actualH = canvasImg.naturalHeight || canvasImg.height || maxDim;
     const scale = Math.min(1, maxDim / Math.max(actualW, actualH));
     const finalW = Math.max(1, Math.round(actualW * scale));
     const finalH = Math.max(1, Math.round(actualH * scale));
@@ -121,26 +121,24 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
     canvas.width = finalW;
     canvas.height = finalH;
     const ctx = canvas.getContext('2d');
-    let dataUrl = null;
+    let outUrl = null;
     if (ctx) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, finalW, finalH);
       ctx.drawImage(canvasImg, 0, 0, finalW, finalH);
-      dataUrl = canvas.toDataURL('image/jpeg', quality);
+      outUrl = canvas.toDataURL('image/jpeg', quality);
       canvas.width = 0;
       canvas.height = 0;
     }
-    // Clean up image and temporary URL after canvas raster extraction is done
     canvasImg.onload = null;
     canvasImg.onerror = null;
     canvasImg.src = '';
-    URL.revokeObjectURL(tempUrl);
-    if (dataUrl && dataUrl.length > 50) return dataUrl;
+    if (outUrl && outUrl.length > 50) return outUrl;
   } catch (fallbackErr) {
     console.warn('[CreateMemorial] Tier 2 fallback note:', fallbackErr);
   }
 
-  // Tier 3: Direct ObjectURL if canvas export fails
+  // Tier 3: Direct ObjectURL if canvas downscaling is unavailable
   try {
     return URL.createObjectURL(file);
   } catch {
@@ -243,6 +241,7 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 /* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
+let isAiWarm = false;
 
 function resetAiModeration() {
   // Do not call tf.disposeVariables() to avoid destroying BlazeFace / COCO-SSD model weights
@@ -281,6 +280,7 @@ async function getObjectModel() {
 async function preloadAiModels() {
   try {
     await Promise.all([getFaceModel(), getObjectModel()]);
+    isAiWarm = true;
   } catch (e) {
     console.warn('[AI Preload] Background warmup note:', e);
   }
@@ -315,11 +315,6 @@ export default function CreateMemorial() {
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [isPublic, setIsPublic] = useState(false);
-
-  // Photo processing overlay state with progress bar
-  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState(0);
-  const [processingStepText, setProcessingStepText] = useState('');
 
   // AI Verification State (informational only — never blocks the wizard)
   const [checkStatus, setCheckStatus] = useState('idle'); // idle | checking | accepted | skipped
@@ -370,9 +365,6 @@ export default function CreateMemorial() {
     setPhoto(null);
     setPreviewUrl('');
     setError(null);
-    setIsProcessingPhoto(false);
-    setProcessingProgress(0);
-    setProcessingStepText('');
     setCheckStatus('idle');
     setDetectedPerson(false);
     setDetectedAnimal(true);
@@ -435,9 +427,6 @@ export default function CreateMemorial() {
     }
     previewUrlRef.current = '';
     setPreviewUrl('');
-    setIsProcessingPhoto(false);
-    setProcessingProgress(0);
-    setProcessingStepText('');
     setIsPublic(false);
     setCheckStatus('idle');
     setDetectedPerson(false);
@@ -482,9 +471,6 @@ export default function CreateMemorial() {
       }
       previewUrlRef.current = '';
       setPreviewUrl('');
-      setIsProcessingPhoto(false);
-      setProcessingProgress(0);
-      setProcessingStepText('');
       setCheckStatus('idle');
       setError(null);
       resetAiModeration();
@@ -509,79 +495,49 @@ export default function CreateMemorial() {
 
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
-  /* ── Non-blocking AI image check (BlazeFace first, 256px canvas) ── */
+  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) ── */
   const runAiCheck = useCallback(async (imageUrl) => {
+    // 1. Ensure TFJS and models are loaded
+    await import('@tensorflow/tfjs');
+    const [faceModel, objectModel] = await Promise.all([
+      getFaceModel(),
+      getObjectModel(),
+    ]);
+
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
+      img.src = imageUrl;
+    });
+
+    let faces = [];
+    let predictions = [];
+
     try {
-      // Load fast lightweight BlazeFace face model first (~2 MB) with 3s timeout
-      const faceModel = await Promise.race([
-        getFaceModel(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Face model timeout')), 3000)),
-      ]);
-
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
-        img.src = imageUrl;
-      });
-
-      // Scale down to lightweight 256x256 canvas for ultra-fast inference without mobile GPU strain
-      const offscreen = document.createElement('canvas');
-      offscreen.width = 256;
-      offscreen.height = 256;
-      const offCtx = offscreen.getContext('2d');
-      if (offCtx) {
-        offCtx.drawImage(img, 0, 0, 256, 256);
-      }
-      const inputSource = offCtx ? offscreen : img;
-
-      let faces = [];
-      try {
-        faces = await faceModel.estimateFaces(inputSource, false);
-      } catch (faceErr) {
-        console.warn('[AI Analysis] Face detection note:', faceErr);
-      }
-
-      // If human face detected, return immediately without waiting for heavy COCO-SSD
-      if (faces && faces.length > 0) {
-        offscreen.width = 0;
-        offscreen.height = 0;
-        img.onload = null;
-        img.onerror = null;
-        img.src = '';
-        return { hasPerson: true, hasAnimal: true };
-      }
-
-      // Background object check via COCO-SSD (with 2s timeout for slow networks)
-      let predictions = [];
-      try {
-        const objectModel = await Promise.race([
-          getObjectModel(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('COCO-SSD load timeout')), 2000)),
-        ]);
-        predictions = await objectModel.detect(inputSource);
-      } catch (objErr) {
-        console.warn('[AI Analysis] Object model skipped or timed out:', objErr?.message || objErr);
-      } finally {
-        offscreen.width = 0;
-        offscreen.height = 0;
-        img.onload = null;
-        img.onerror = null;
-        img.src = '';
-      }
-
-      const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-      return {
-        hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
-        hasAnimal: predictions.length === 0 ? true : predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
-      };
-    } catch (err) {
-      console.warn('[AI Analysis] Graceful fallback note:', err?.message || err);
-      return { hasPerson: false, hasAnimal: true };
+      faces = await faceModel.estimateFaces(img, false);
+    } catch (faceErr) {
+      console.warn('[AI Analysis] Face detection warning:', faceErr);
     }
+
+    try {
+      predictions = await objectModel.detect(img);
+    } catch (objErr) {
+      console.warn('[AI Analysis] Object detection warning:', objErr);
+    } finally {
+      img.onload = null;
+      img.onerror = null;
+      img.src = '';
+    }
+
+    const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
+    return {
+      hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
+      hasAnimal: predictions.length === 0 ? true : predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
+    };
   }, []);
 
-  /* Background AI verification pipeline: runs with 3.5s timeout.
+  /* Background AI verification pipeline: runs with dynamic timeout (cold: 15s, warm: 5s).
    * Fast preview is already on screen; nothing here blocks the UI. */
   const processSelectedImage = useCallback(async (file, imagePreviewUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
@@ -595,25 +551,29 @@ export default function CreateMemorial() {
         aiUrl = tempUrl;
       }
 
+      const timeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
+
       const result = await Promise.race([
         runAiCheck(aiUrl).catch((err) => {
-          console.warn('[AI Analysis] Check note:', err?.message || err);
-          return { hasPerson: false, hasAnimal: true };
+          console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
+          return null;
         }),
-        new Promise((resolve) => setTimeout(() => resolve({ hasPerson: false, hasAnimal: true }), AI_CHECK_MAX_TIMEOUT_MS)),
+        new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
       ]);
       if (!isCurrent()) return;
 
-      setDetectedPerson(Boolean(result?.hasPerson));
-      setDetectedAnimal(result?.hasAnimal ?? true);
-      setCheckStatus('accepted');
-    } catch (err) {
-      console.warn('[CreateMemorial] Image processing note:', err?.message || err);
-      if (isCurrent()) {
-        setDetectedPerson(false);
-        setDetectedAnimal(true);
+      if (result) {
+        isAiWarm = true;
+        setDetectedPerson(Boolean(result.hasPerson));
+        setDetectedAnimal(Boolean(result.hasAnimal));
         setCheckStatus('accepted');
+      } else {
+        console.warn('[AI Analysis] Timed out or unavailable — check skipped.');
+        setCheckStatus('skipped');
       }
+    } catch (err) {
+      console.warn('[CreateMemorial] Image processing error, check skipped:', err?.message || err);
+      if (isCurrent()) setCheckStatus('skipped');
     } finally {
       if (tempUrl) URL.revokeObjectURL(tempUrl);
     }
@@ -645,12 +605,7 @@ export default function CreateMemorial() {
     setHumanConsentGiven(false);
     setCheckStatus('checking');
 
-    // Start progress overlay
-    setIsProcessingPhoto(true);
-    setProcessingProgress(20);
-    setProcessingStepText('Optimizing image for preview…');
-
-    // 1. Generate lightweight proportional Data URL preview
+    // 1. Generate lightweight proportional Data URL preview immediately
     let thumbUrl = null;
     try {
       thumbUrl = await generateThumbnail(file);
@@ -675,19 +630,8 @@ export default function CreateMemorial() {
       setPreviewUrl(objectUrl);
     }
 
-    setProcessingProgress(60);
-    setProcessingStepText('Checking pet photo with AI…');
-
-    // 2. Run non-blocking AI verification on the lightweight thumbnail or file
-    try {
-      await processSelectedImage(file, thumbUrl || previewUrlRef.current, runId);
-    } catch (aiErr) {
-      console.warn('[CreateMemorial] AI check process note:', aiErr);
-    }
-    if (!isCurrent()) return;
-
-    setProcessingProgress(90);
-    setProcessingStepText('Finalizing…');
+    // 2. Run non-blocking AI verification in background (does NOT block preview or UI)
+    processSelectedImage(file, thumbUrl || previewUrlRef.current, runId);
 
     // 3. Background safe compression for Arweave payload
     resizeImage(file, 1000, 1000, COMPRESSION_QUALITY)
@@ -699,16 +643,6 @@ export default function CreateMemorial() {
       .catch((compErr) => {
         console.warn('[CreateMemorial] Background compression note:', compErr);
       });
-
-    setProcessingProgress(100);
-    setProcessingStepText('Ready!');
-
-    // Smooth transition: close overlay after progress bar reaches 100%
-    setTimeout(() => {
-      if (isCurrent()) {
-        setIsProcessingPhoto(false);
-      }
-    }, 300);
   }, [processSelectedImage]);
 
   const handleImageError = useCallback((e) => {
@@ -1185,38 +1119,7 @@ export default function CreateMemorial() {
                 }}
               />
 
-              {isProcessingPhoto ? (
-                /* Processing overlay: dimmed frosted-glass card with progress bar */
-                <div className="relative w-full h-56 rounded-2xl border border-[#d8c2ba]/50 bg-[#fbf9f6]/90 backdrop-blur-md flex flex-col items-center justify-center p-6 space-y-4 shadow-xs animate-fadeIn">
-                  <div className="flex items-center gap-2.5 text-[#8a4f36]">
-                    <span className="inline-block w-4 h-4 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm font-medium tracking-wide">{processingStepText || 'Processing photo…'}</span>
-                  </div>
-
-                  {/* Progress bar */}
-                  <div className="w-56 sm:w-72 h-2 bg-[#e4e2df] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-[#8a4f36] rounded-full transition-all duration-300 ease-out"
-                      style={{ width: `${processingProgress}%` }}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between w-56 sm:w-72 text-[11px] text-[#85736d]">
-                    <span>{processingProgress}%</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        analysisRunIdRef.current += 1;
-                        setIsProcessingPhoto(false);
-                        setCheckStatus('accepted');
-                      }}
-                      className="text-[#8a4f36] hover:text-[#53433e] underline font-medium cursor-pointer"
-                    >
-                      Skip
-                    </button>
-                  </div>
-                </div>
-              ) : previewUrl ? (
+              {previewUrl ? (
                 <div className="space-y-3 animate-fadeIn">
                   <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
                     <img
@@ -1239,8 +1142,31 @@ export default function CreateMemorial() {
                     </button>
                   </div>
 
+                  {/* Non-blocking image check status */}
+                  {checkStatus === 'checking' && (
+                    <div className="bg-[#fcf8f5] border border-[#d8c2ba]/40 rounded-xl p-3 flex items-center justify-between gap-2.5 text-xs text-[#8a4f36] animate-fadeIn">
+                      <div className="flex items-center gap-2.5">
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+                        <span className="font-medium">Checking image… you can continue anytime</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          console.log('[AI Analysis] Manually skipped by user');
+                          analysisRunIdRef.current += 1;
+                          setCheckStatus('skipped');
+                          setDetectedPerson(false);
+                          setDetectedAnimal(true);
+                        }}
+                        className="text-xs text-[#8a4f36] hover:text-[#53433e] underline font-semibold cursor-pointer shrink-0"
+                      >
+                        Skip Check
+                      </button>
+                    </div>
+                  )}
+
                   {/* Image check status badge */}
-                  {checkStatus === 'accepted' && (
+                  {checkStatus === 'accepted' && !detectedPerson && (
                     <div className="flex items-center gap-1.5 text-xs text-green-700 font-medium">
                       <span className="material-symbols-outlined text-sm">check_circle</span>
                       <span>Image accepted</span>
