@@ -21,21 +21,22 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 
 /* ── Photo processing constants ───────────────────────────── */
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
-const MAX_IMAGE_DIMENSION = 1200;             // px, longest side after compression
+const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
+const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
 const AI_CHECK_TIMEOUT_MS = 3000;             // AI check must never block longer than this
 
 /**
- * Downscale a photo via Canvas (max 1200px, JPEG 0.85) so phone camera images
- * (10+ MB) don't exhaust browser memory. Falls back to the original file on
- * any failure (e.g. HEIC the browser cannot decode) and never throws.
+ * Downscale a photo via Canvas (max 1000px, JPEG 0.8) asynchronously so phone camera images
+ * (10+ MB) don't exhaust browser memory or Arweave storage.
+ * Falls back to the original file on any failure and never throws.
  */
-async function compressImage(file, maxDim = MAX_IMAGE_DIMENSION, quality = 0.85) {
+async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX_IMAGE_DIMENSION, quality = COMPRESSION_QUALITY) {
   try {
-    if (!file.type?.startsWith('image/') || file.type === 'image/gif') return file;
+    if (!file || !file.type?.startsWith('image/') || file.type === 'image/gif') return file;
 
-    let source;
-    let width;
-    let height;
+    let source = null;
+    let width = 0;
+    let height = 0;
     let cleanup = () => {};
 
     if (typeof createImageBitmap === 'function') {
@@ -52,24 +53,40 @@ async function compressImage(file, maxDim = MAX_IMAGE_DIMENSION, quality = 0.85)
 
     if (!source) {
       const url = URL.createObjectURL(file);
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('decode failed'));
-        img.src = url;
-      }).finally(() => URL.revokeObjectURL(url));
-      source = img;
-      width = img.naturalWidth;
-      height = img.naturalHeight;
+      try {
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('decode failed'));
+          img.src = url;
+        });
+        source = img;
+        width = img.naturalWidth;
+        height = img.naturalHeight;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     }
 
-    const scale = Math.min(1, maxDim / Math.max(width, height));
-    if (scale === 1 && file.size <= 2 * 1024 * 1024) { cleanup(); return file; }
+    if (!width || !height) {
+      cleanup();
+      return file;
+    }
+
+    const scale = Math.min(1, maxWidth / width, maxHeight / height);
+    if (scale >= 1 && file.size <= 2 * 1024 * 1024) {
+      cleanup();
+      return file;
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(width * scale));
     canvas.height = Math.max(1, Math.round(height * scale));
     const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      cleanup();
+      return file;
+    }
     ctx.fillStyle = '#ffffff'; // JPEG has no alpha — avoid black backgrounds for PNGs
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
@@ -83,7 +100,7 @@ async function compressImage(file, maxDim = MAX_IMAGE_DIMENSION, quality = 0.85)
     const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
     return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
   } catch (err) {
-    console.warn('[CreateMemorial] Image compression skipped:', err?.message || err);
+    console.warn('[CreateMemorial] Image compression skipped, using original file fallback:', err?.message || err);
     return file;
   }
 }
@@ -161,6 +178,17 @@ export default function CreateMemorial() {
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
+  // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
+  const previewUrlRef = useRef('');
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = '';
+      }
+    };
+  }, []);
+
   const { writeContractAsync } = useWriteContract();
   const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
 
@@ -211,6 +239,10 @@ export default function CreateMemorial() {
     setPassingYear('');
     setDescription('');
     setPhoto(null);
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = '';
+    }
     setPreviewUrl('');
     setIsPublic(false);
     setIsAnalyzingImage(false);
@@ -219,7 +251,7 @@ export default function CreateMemorial() {
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
     setFlowStep(0);
-    setError('');
+    setError(null);
     setIsMinting(false);
     setIsInitiating(false);
     setTxHash(null);
@@ -252,10 +284,14 @@ export default function CreateMemorial() {
       setDraft(null);
       analysisRunIdRef.current += 1;
       setPhoto(null);
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = '';
+      }
       setPreviewUrl('');
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
-      setError('');
+      setError(null);
     }
   }, [isSuccess]);
 
@@ -313,20 +349,30 @@ export default function CreateMemorial() {
     };
   }, []);
 
-  /* Background pipeline: compress (canvas, max 1200px) → AI check (3s race).
+  /* Background pipeline: safe resize (canvas, max 1000px, quality 0.8) → AI check (3s race).
    * The preview is already on screen; nothing here can block the UI. */
   const processSelectedImage = useCallback(async (file, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     let tempUrl = null;
     try {
-      const compressed = await Promise.race([
-        compressImage(file),
-        new Promise((resolve) => setTimeout(() => resolve(file), 5000)),
-      ]);
-      if (!isCurrent()) return;
-      if (compressed !== file) setPhoto(compressed);
+      let imageToAnalyze = file;
+      try {
+        const compressed = await Promise.race([
+          resizeImage(file, 1000, 1000, COMPRESSION_QUALITY),
+          new Promise((resolve) => setTimeout(() => resolve(file), 5000)),
+        ]);
+        if (!isCurrent()) return;
+        if (compressed && compressed !== file) {
+          setPhoto(compressed);
+          imageToAnalyze = compressed;
+        }
+      } catch (compErr) {
+        console.warn('[CreateMemorial] Safe resize error, using fallback:', compErr);
+      }
 
-      tempUrl = URL.createObjectURL(compressed);
+      if (!isCurrent()) return;
+
+      tempUrl = URL.createObjectURL(imageToAnalyze);
       const result = await Promise.race([
         runAiCheck(tempUrl).catch((err) => {
           console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
@@ -356,31 +402,43 @@ export default function CreateMemorial() {
   /* ── Photo handlers ────────────────────────────────────── */
   const handlePhotoSelect = useCallback((file) => {
     if (!file) return;
-    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name || '');
-    if (!looksLikeImage) { setError('Please select a valid image file'); return; }
-    if (file.size > MAX_RAW_PHOTO_BYTES) { setError('Photo must be under 30 MB'); return; }
+
+    // Check for HEIC / HEIF format from mobile cameras
+    const isHeic = file.type === 'image/heic' ||
+      file.type === 'image/heif' ||
+      /\.(heic|heif)$/i.test(file.name || '');
+    if (isHeic) {
+      setError('Пожалуйста, используйте фото в формате JPG или PNG (отключите HEIF в настройках камеры)');
+      return;
+    }
+
+    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.name || '');
+    if (!looksLikeImage) {
+      setError('Пожалуйста, используйте фото в формате JPG или PNG');
+      return;
+    }
+    if (file.size > MAX_RAW_PHOTO_BYTES) {
+      setError('Photo must be under 30 MB');
+      return;
+    }
 
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
 
+    // Release old preview URL only when a new file is chosen
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = '';
+    }
+
+    // 1) Instant zero-wait preview without pre-compression
+    const objectUrl = URL.createObjectURL(file);
+    previewUrlRef.current = objectUrl;
+    setPreviewUrl(objectUrl);
     setPhoto(file);
-    setError('');
+    setError(null);
 
-    // Robust base64 Data URL generation
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result;
-      if (typeof dataUrl === 'string') {
-        setPreviewUrl(dataUrl);
-      }
-    };
-    reader.onerror = (err) => {
-      console.error('[CreateMemorial] FileReader failed:', err);
-      setError('Failed to load image preview');
-    };
-    reader.readAsDataURL(file);
-
-    // Reset previous check results, then run background compression & non-blocking AI check
+    // 2) Reset previous check results, then run background compression & non-blocking AI check
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
@@ -393,7 +451,7 @@ export default function CreateMemorial() {
     e.preventDefault();
     e.currentTarget.classList.remove('border-[#8a4f36]');
     const file = e.dataTransfer.files[0];
-    if (file?.type.startsWith('image/')) handlePhotoSelect(file);
+    if (file) handlePhotoSelect(file);
   }, [handlePhotoSelect]);
 
   /* ── Submit flow: Arweave upload → mint ──────────────── */
@@ -833,7 +891,7 @@ export default function CreateMemorial() {
               <input
                 id="photo-input"
                 type="file"
-                accept="image/*"
+                accept="image/jpeg,image/png,image/webp"
                 className="hidden"
                 onChange={(e) => {
                   handlePhotoSelect(e.target.files?.[0]);
@@ -854,6 +912,10 @@ export default function CreateMemorial() {
                       type="button"
                       onClick={() => {
                         analysisRunIdRef.current += 1;
+                        if (previewUrlRef.current) {
+                          URL.revokeObjectURL(previewUrlRef.current);
+                          previewUrlRef.current = '';
+                        }
                         setPhoto(null);
                         setPreviewUrl('');
                         setIsAnalyzingImage(false);
