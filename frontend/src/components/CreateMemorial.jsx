@@ -43,7 +43,66 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
   );
   if (!isImage || file.type === 'image/gif') return null;
 
-  // Tier 1: Hardware-accelerated DCT downsampling on decode via createImageBitmap (Chrome Android, Desktop)
+  // Approach 1: HTMLImageElement via lightweight ObjectURL
+  // Universal across iOS Safari, Android Chrome/Samsung, and Desktop.
+  // Respects EXIF orientation automatically, decodes natively, and frees memory immediately.
+  try {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const nw = img.naturalWidth || img.width;
+            const nh = img.naturalHeight || img.height;
+            if (!nw || !nh) {
+              reject(new Error('Invalid image dimensions'));
+              return;
+            }
+            const scale = Math.min(1, maxDim / Math.max(nw, nh));
+            const w = Math.max(1, Math.round(nw * scale));
+            const h = Math.max(1, Math.round(nh * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              reject(new Error('Canvas 2D context unavailable'));
+              return;
+            }
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            const res = canvas.toDataURL('image/jpeg', quality);
+            canvas.width = 0;
+            canvas.height = 0;
+            img.onload = null;
+            img.onerror = null;
+            img.src = '';
+            resolve(res);
+          } catch (e) {
+            reject(e);
+          }
+        };
+        img.onerror = () => {
+          img.onload = null;
+          img.onerror = null;
+          img.src = '';
+          reject(new Error('Image decode failed'));
+        };
+        img.src = objectUrl;
+      });
+      if (dataUrl && dataUrl.startsWith('data:image/jpeg;base64,')) {
+        return dataUrl;
+      }
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  } catch (err) {
+    console.warn('[CreateMemorial] Thumbnail Approach 1 (Image) note:', err?.message || err);
+  }
+
+  // Approach 2: createImageBitmap with hardware downsampling (Chrome Android, Desktop)
   if (typeof createImageBitmap === 'function') {
     try {
       let bmp = null;
@@ -51,51 +110,38 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
         bmp = await createImageBitmap(file, {
           resizeWidth: maxDim,
           resizeQuality: 'medium',
-          imageOrientation: 'from-image',
         });
       } catch {
-        bmp = await createImageBitmap(file, {
-          resizeWidth: maxDim,
-          resizeQuality: 'medium',
-        });
+        bmp = await createImageBitmap(file);
       }
-
-      // If image is excessively tall portrait (panorama), constrain by height instead
-      if (bmp.height > 1200) {
-        try {
-          const tallBmp = await createImageBitmap(file, {
-            resizeHeight: maxDim,
-            resizeQuality: 'medium',
-            imageOrientation: 'from-image',
-          });
+      if (bmp) {
+        const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+        const w = Math.max(1, Math.round(bmp.width * scale));
+        const h = Math.max(1, Math.round(bmp.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(bmp, 0, 0, w, h);
           bmp.close?.();
-          bmp = tallBmp;
-        } catch {
-          // Keep current bmp if height resize fails
+          const res = canvas.toDataURL('image/jpeg', quality);
+          canvas.width = 0;
+          canvas.height = 0;
+          if (res && res.startsWith('data:image/jpeg;base64,')) {
+            return res;
+          }
         }
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, bmp.width, bmp.height);
-        ctx.drawImage(bmp, 0, 0);
         bmp.close?.();
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        canvas.width = 0;
-        canvas.height = 0;
-        if (dataUrl && dataUrl.length > 50) return dataUrl;
       }
-      bmp.close?.();
-    } catch {
-      // Fall through to Tier 2 (e.g. iOS Safari where options dictionary throws)
+    } catch (bmpErr) {
+      console.warn('[CreateMemorial] Thumbnail Approach 2 (Bitmap) note:', bmpErr?.message || bmpErr);
     }
   }
 
-  // Tier 2: Universal Canvas fallback using loaded Image (iOS Safari)
+  // Approach 3: Universal FileReader Data URL fallback
   try {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -103,52 +149,19 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-
-    const canvasImg = new Image();
-    await new Promise((resolve, reject) => {
-      canvasImg.onload = resolve;
-      canvasImg.onerror = reject;
-      canvasImg.src = dataUrl;
-    });
-
-    const actualW = canvasImg.naturalWidth || canvasImg.width || maxDim;
-    const actualH = canvasImg.naturalHeight || canvasImg.height || maxDim;
-    const scale = Math.min(1, maxDim / Math.max(actualW, actualH));
-    const finalW = Math.max(1, Math.round(actualW * scale));
-    const finalH = Math.max(1, Math.round(actualH * scale));
-
-    const canvas = document.createElement('canvas');
-    canvas.width = finalW;
-    canvas.height = finalH;
-    const ctx = canvas.getContext('2d');
-    let outUrl = null;
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, finalW, finalH);
-      ctx.drawImage(canvasImg, 0, 0, finalW, finalH);
-      outUrl = canvas.toDataURL('image/jpeg', quality);
-      canvas.width = 0;
-      canvas.height = 0;
+    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+      return dataUrl;
     }
-    canvasImg.onload = null;
-    canvasImg.onerror = null;
-    canvasImg.src = '';
-    if (outUrl && outUrl.length > 50) return outUrl;
-  } catch (fallbackErr) {
-    console.warn('[CreateMemorial] Tier 2 fallback note:', fallbackErr);
+  } catch (readerErr) {
+    console.warn('[CreateMemorial] Thumbnail Approach 3 (FileReader) note:', readerErr?.message || readerErr);
   }
 
-  // Tier 3: Direct ObjectURL if canvas downscaling is unavailable
-  try {
-    return URL.createObjectURL(file);
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 /**
- * Downscale a photo via Canvas (max 1000px, JPEG 0.8) asynchronously so phone camera images
- * (10+ MB) don't exhaust browser memory or Arweave storage.
+ * Downscale a photo via Canvas (max 1000px, JPEG 0.8) for Arweave payload.
+ * Runs right before upload so it never blocks the UI or exhausts phone memory during form editing.
  * Falls back to the original file on any failure and never throws.
  */
 async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX_IMAGE_DIMENSION, quality = COMPRESSION_QUALITY) {
@@ -157,31 +170,31 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
     const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || ''));
     if (!isImage) return file;
 
+    // Small files under 1.5 MB don't require downscaling
+    if (file.size <= 1.5 * 1024 * 1024) return file;
+
     let source = null;
     let width = 0;
     let height = 0;
     let cleanup = () => {};
 
+    // 1. Try createImageBitmap with hardware downsampling to avoid full 50MP RAM explosion
     if (typeof createImageBitmap === 'function') {
       try {
-        const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        const bitmap = await createImageBitmap(file, {
+          resizeWidth: maxWidth,
+          resizeQuality: 'medium',
+        });
         source = bitmap;
         width = bitmap.width;
         height = bitmap.height;
         cleanup = () => bitmap.close?.();
       } catch {
-        try {
-          const bitmap = await createImageBitmap(file);
-          source = bitmap;
-          width = bitmap.width;
-          height = bitmap.height;
-          cleanup = () => bitmap.close?.();
-        } catch {
-          source = null;
-        }
+        // Fall back to Image
       }
     }
 
+    // 2. Fall back to Image via lightweight ObjectURL
     if (!source) {
       const url = URL.createObjectURL(file);
       try {
@@ -194,7 +207,12 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
         source = img;
         width = img.naturalWidth;
         height = img.naturalHeight;
-        cleanup = () => URL.revokeObjectURL(url);
+        cleanup = () => {
+          URL.revokeObjectURL(url);
+          img.onload = null;
+          img.onerror = null;
+          img.src = '';
+        };
       } catch (err) {
         URL.revokeObjectURL(url);
         throw err;
@@ -331,6 +349,8 @@ export default function CreateMemorial() {
   const [mintedIsPublic, setMintedIsPublic] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
+  const [photoInputKey, setPhotoInputKey] = useState(0);
+
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
@@ -362,6 +382,7 @@ export default function CreateMemorial() {
     }
     previewUrlRef.current = '';
     if (fileInputRef.current) fileInputRef.current.value = '';
+    setPhotoInputKey((k) => k + 1);
     setPhoto(null);
     setPreviewUrl('');
     setError(null);
@@ -421,6 +442,7 @@ export default function CreateMemorial() {
     setPassingYear('');
     setDescription('');
     if (fileInputRef.current) fileInputRef.current.value = '';
+    setPhotoInputKey((k) => k + 1);
     setPhoto(null);
     if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrlRef.current);
@@ -465,6 +487,7 @@ export default function CreateMemorial() {
       setDraft(null);
       analysisRunIdRef.current += 1;
       if (fileInputRef.current) fileInputRef.current.value = '';
+      setPhotoInputKey((k) => k + 1);
       setPhoto(null);
       if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current);
@@ -621,33 +644,39 @@ export default function CreateMemorial() {
       previewUrlRef.current = thumbUrl;
       setPreviewUrl(thumbUrl);
     } else {
-      // Fallback to object URL if thumbnail generation failed
-      const objectUrl = URL.createObjectURL(file);
-      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-        URL.revokeObjectURL(previewUrlRef.current);
+      // Safe fallback: only use ObjectURL for smaller files (< 3MB) to avoid mobile GPU texture crashes
+      if (file.size <= 3 * 1024 * 1024) {
+        const objectUrl = URL.createObjectURL(file);
+        if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+          URL.revokeObjectURL(previewUrlRef.current);
+        }
+        previewUrlRef.current = objectUrl;
+        setPreviewUrl(objectUrl);
+      } else {
+        setError('Could not process this image format. Please select another photo.');
+        setCheckStatus('idle');
+        return;
       }
-      previewUrlRef.current = objectUrl;
-      setPreviewUrl(objectUrl);
     }
 
     // 2. Run non-blocking AI verification in background (does NOT block preview or UI)
     processSelectedImage(file, thumbUrl || previewUrlRef.current, runId);
-
-    // 3. Background safe compression for Arweave payload
-    resizeImage(file, 1000, 1000, COMPRESSION_QUALITY)
-      .then((compressed) => {
-        if (isCurrent() && compressed && compressed !== file) {
-          setPhoto(compressed);
-        }
-      })
-      .catch((compErr) => {
-        console.warn('[CreateMemorial] Background compression note:', compErr);
-      });
   }, [processSelectedImage]);
 
-  const handleImageError = useCallback((e) => {
-    console.warn('[CreateMemorial] Image preview decode note:', e);
-  }, []);
+  const handleImageError = useCallback(async (e) => {
+    console.warn('[CreateMemorial] Image preview decode note, attempting recovery:', e);
+    if (photo) {
+      try {
+        const recoveryUrl = await generateThumbnail(photo, 600, 0.75);
+        if (recoveryUrl && recoveryUrl !== previewUrlRef.current) {
+          previewUrlRef.current = recoveryUrl;
+          setPreviewUrl(recoveryUrl);
+        }
+      } catch (recErr) {
+        console.warn('[CreateMemorial] Image preview recovery failed:', recErr);
+      }
+    }
+  }, [photo]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -700,7 +729,15 @@ export default function CreateMemorial() {
     try {
       setFlowStep(1);
       let imageTxId = '';
-      if (photo) imageTxId = await uploadToArweave(photo, [{ name: 'Pet-Name', value: petName }]);
+      if (photo) {
+        let photoToUpload = photo;
+        try {
+          photoToUpload = await resizeImage(photo, MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION, COMPRESSION_QUALITY);
+        } catch (compErr) {
+          console.warn('[CreateMemorial] Arweave image preparation note:', compErr);
+        }
+        imageTxId = await uploadToArweave(photoToUpload, [{ name: 'Pet-Name', value: petName }]);
+      }
 
       setFlowStep(2);
       const metadata = buildNftMetadata({ petName, description, birthDate, memorialDate, birthYear, passingYear, species, breed, imageTxId, ownerAddress: userAddress });
@@ -1091,6 +1128,7 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input accessible to iOS Safari and Android */}
               <input
+                key={photoInputKey}
                 ref={fileInputRef}
                 id="photo-input"
                 type="file"
@@ -1106,16 +1144,11 @@ export default function CreateMemorial() {
                   clip: 'rect(0,0,0,0)',
                   border: 0,
                 }}
-                onClick={(e) => {
-                  // Resetting value on click allows re-selecting the exact same file without killing SAF
-                  e.currentTarget.value = '';
-                }}
                 onChange={(e) => {
                   const selectedFile = e.target.files?.[0];
                   if (selectedFile) {
                     handlePhotoSelect(selectedFile);
                   }
-                  // NEVER call e.target.value = '' here!
                 }}
               />
 
