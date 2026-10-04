@@ -23,17 +23,18 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
-const THUMBNAIL_MAX_DIMENSION = 800;          // px, max dimension for fast initial thumbnail
+const THUMBNAIL_MAX_DIMENSION = 500;          // px, max dimension for fast initial thumbnail
 const THUMBNAIL_QUALITY = 0.75;               // fast preview quality
 const AI_CHECK_TIMEOUT_MS = 3000;             // AI check must never block longer than this
 
 /**
- * Fast lightweight thumbnail generation (<= 800px, JPEG 0.75) for instant zero-lag preview.
+ * Fast lightweight thumbnail generation (<= 500px, JPEG 0.75 Data URL) for instant zero-lag preview.
  * Prevents WebKit/Chromium decoder memory crashes on 12-48MP raw phone photos.
+ * Returns a small base64 Data URL (~20-40 KB) with no ObjectURL lifecycle or revocation bugs.
  */
 async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality = THUMBNAIL_QUALITY) {
   if (!file || !file.type?.startsWith('image/') || file.type === 'image/gif') {
-    return file;
+    return null;
   }
 
   let source = null;
@@ -43,26 +44,13 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
 
   if (typeof createImageBitmap === 'function') {
     try {
-      // Try resizing directly during decode if supported (WebKit / Chromium optimization)
-      const bitmap = await createImageBitmap(file, {
-        resizeWidth: maxDim,
-        resizeQuality: 'medium',
-        imageOrientation: 'from-image',
-      });
+      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
       source = bitmap;
       width = bitmap.width;
       height = bitmap.height;
       cleanup = () => bitmap.close?.();
     } catch {
-      try {
-        const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
-        source = bitmap;
-        width = bitmap.width;
-        height = bitmap.height;
-        cleanup = () => bitmap.close?.();
-      } catch {
-        source = null;
-      }
+      source = null;
     }
   }
 
@@ -78,14 +66,16 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
       source = img;
       width = img.naturalWidth;
       height = img.naturalHeight;
-    } finally {
+      cleanup = () => URL.revokeObjectURL(url);
+    } catch (e) {
       URL.revokeObjectURL(url);
+      throw e;
     }
   }
 
   if (!width || !height) {
     cleanup();
-    return file;
+    return null;
   }
 
   const scale = Math.min(1, maxDim / Math.max(width, height));
@@ -98,17 +88,23 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     cleanup();
-    return file;
+    return null;
   }
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, targetWidth, targetHeight);
   ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
-  cleanup();
+  cleanup(); // Safely called AFTER drawImage
 
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
-  canvas.width = 0;
-  canvas.height = 0;
-  return blob || file;
+  try {
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    canvas.width = 0;
+    canvas.height = 0;
+    return dataUrl;
+  } catch {
+    canvas.width = 0;
+    canvas.height = 0;
+    return null;
+  }
 }
 
 /**
@@ -149,8 +145,10 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
         source = img;
         width = img.naturalWidth;
         height = img.naturalHeight;
-      } finally {
+        cleanup = () => URL.revokeObjectURL(url);
+      } catch (err) {
         URL.revokeObjectURL(url);
+        throw err;
       }
     }
 
@@ -176,7 +174,7 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
     ctx.fillStyle = '#ffffff'; // JPEG has no alpha — avoid black backgrounds for PNGs
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-    cleanup();
+    cleanup(); // Safely called AFTER drawImage
 
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
     canvas.width = 0;
@@ -194,6 +192,28 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 /* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
+let tfModulePromise = null;
+
+async function getTf() {
+  if (!tfModulePromise) {
+    tfModulePromise = import('@tensorflow/tfjs');
+  }
+  return tfModulePromise;
+}
+
+function resetAiModeration() {
+  if (tfModulePromise) {
+    tfModulePromise.then((tf) => {
+      try {
+        tf.disposeVariables();
+      } catch {
+        // ignore
+      }
+    }).catch(() => {});
+  }
+  cachedFaceModelPromise = null;
+  cachedObjectModelPromise = null;
+}
 
 async function getFaceModel() {
   if (!cachedFaceModelPromise) {
@@ -243,6 +263,7 @@ export default function CreateMemorial() {
   const [description, setDescription] = useState('');
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
+  const [previewFailed, setPreviewFailed] = useState(false);
   const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
 
@@ -276,6 +297,7 @@ export default function CreateMemorial() {
         URL.revokeObjectURL(previewUrlRef.current);
         previewUrlRef.current = '';
       }
+      resetAiModeration();
     };
   }, []);
 
@@ -288,6 +310,7 @@ export default function CreateMemorial() {
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
+    setPreviewFailed(false);
     setError(null);
     setIsGeneratingPreview(false);
     setIsAnalyzingImage(false);
@@ -295,6 +318,7 @@ export default function CreateMemorial() {
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
+    resetAiModeration();
   }, []);
 
   const { writeContractAsync } = useWriteContract();
@@ -353,6 +377,7 @@ export default function CreateMemorial() {
       previewUrlRef.current = '';
     }
     setPreviewUrl('');
+    setPreviewFailed(false);
     setIsGeneratingPreview(false);
     setIsPublic(false);
     setIsAnalyzingImage(false);
@@ -367,6 +392,7 @@ export default function CreateMemorial() {
     setTxHash(null);
     setMintedIsPublic(false);
     setShowShareModal(false);
+    resetAiModeration();
   }, []);
 
   // Initialize clean state and check for saved draft on mount
@@ -398,10 +424,12 @@ export default function CreateMemorial() {
         previewUrlRef.current = '';
       }
       setPreviewUrl('');
+      setPreviewFailed(false);
       setIsGeneratingPreview(false);
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
       setError(null);
+      resetAiModeration();
     }
   }, [isSuccess]);
 
@@ -427,41 +455,53 @@ export default function CreateMemorial() {
    * Runs on a small compressed copy. Resolves with
    * { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
   const runAiCheck = useCallback(async (imageUrl) => {
-    await import('@tensorflow/tfjs');
+    const tf = await getTf();
     const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
-      img.src = imageUrl;
-    });
-
-    let faces = [];
-    let predictions = [];
     try {
-      const faceModel = await getFaceModel();
-      faces = await faceModel.estimateFaces(img, false);
-    } catch (faceErr) {
-      cachedFaceModelPromise = null;
-      console.warn('[AI Analysis] Face detection warning:', faceErr);
-    }
-    try {
-      const objectModel = await getObjectModel();
-      predictions = await objectModel.detect(img);
-    } catch (objErr) {
-      cachedObjectModelPromise = null;
-      console.warn('[AI Analysis] Object detection warning:', objErr);
-    }
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
+        img.src = imageUrl;
+      });
 
-    const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-    return {
-      hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
-      hasAnimal: predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
-    };
+      let faces = [];
+      let predictions = [];
+
+      // Guarantee clean tensor memory by wrapping in tf.engine().startScope() / endScope()
+      tf.engine().startScope();
+      try {
+        const faceModel = await getFaceModel();
+        faces = await faceModel.estimateFaces(img, false);
+      } catch (faceErr) {
+        cachedFaceModelPromise = null;
+        console.warn('[AI Analysis] Face detection warning:', faceErr);
+      }
+
+      try {
+        const objectModel = await getObjectModel();
+        predictions = await objectModel.detect(img);
+      } catch (objErr) {
+        cachedObjectModelPromise = null;
+        console.warn('[AI Analysis] Object detection warning:', objErr);
+      } finally {
+        tf.engine().endScope();
+      }
+
+      const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
+      return {
+        hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
+        hasAnimal: predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
+      };
+    } finally {
+      img.onload = null;
+      img.onerror = null;
+      img.src = '';
+    }
   }, []);
 
   /* Background pipeline: safe resize (canvas, max 1000px, quality 0.8) → delayed AI check.
    * The lightweight thumbnail preview is already on screen; nothing here blocks the UI. */
-  const processSelectedImage = useCallback(async (file, runId) => {
+  const processSelectedImage = useCallback(async (file, thumbDataUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     let tempUrl = null;
     try {
@@ -480,14 +520,6 @@ export default function CreateMemorial() {
         if (compressed && compressed !== file) {
           setPhoto(compressed);
           imageToAnalyze = compressed;
-
-          // Synchronize previewUrl with the optimized compressed image
-          const compressedUrl = URL.createObjectURL(compressed);
-          if (previewUrlRef.current) {
-            URL.revokeObjectURL(previewUrlRef.current);
-          }
-          previewUrlRef.current = compressedUrl;
-          setPreviewUrl(compressedUrl);
         }
       } catch (compErr) {
         console.warn('[CreateMemorial] Safe resize error, using fallback:', compErr);
@@ -505,10 +537,15 @@ export default function CreateMemorial() {
       });
       if (!isCurrent()) return;
 
-      // 4. Run AI verification
-      tempUrl = URL.createObjectURL(imageToAnalyze);
+      // 4. Run AI verification using fast 500px thumbnail or compressed image
+      let aiUrl = thumbDataUrl;
+      if (!aiUrl) {
+        tempUrl = URL.createObjectURL(imageToAnalyze);
+        aiUrl = tempUrl;
+      }
+
       const result = await Promise.race([
-        runAiCheck(tempUrl).catch((err) => {
+        runAiCheck(aiUrl).catch((err) => {
           console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
           return null;
         }),
@@ -553,6 +590,7 @@ export default function CreateMemorial() {
 
     setPhoto(file);
     setError(null);
+    setPreviewFailed(false);
     setIsGeneratingPreview(true);
 
     // Reset previous check results
@@ -562,45 +600,44 @@ export default function CreateMemorial() {
     setCheckStatus('idle');
 
     // 1) Fast lightweight thumbnail generation (Thumbnail First)
-    let thumbUrl = null;
+    let thumbDataUrl = null;
     try {
-      const thumb = await generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY);
-      if (!isCurrent()) return;
-      thumbUrl = URL.createObjectURL(thumb);
+      thumbDataUrl = await generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY);
     } catch (thumbErr) {
       console.warn('[CreateMemorial] Thumbnail generation failed:', thumbErr);
-      if (!isCurrent()) return;
-
-      const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
-      if (isHeic) {
-        setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
-      } else {
-        // Fallback to direct object URL
-        thumbUrl = URL.createObjectURL(file);
-      }
     } finally {
       if (isCurrent()) {
         setIsGeneratingPreview(false);
       }
     }
 
-    if (!isCurrent()) {
-      if (thumbUrl) URL.revokeObjectURL(thumbUrl);
-      return;
-    }
+    if (!isCurrent()) return;
 
-    if (thumbUrl) {
+    if (thumbDataUrl) {
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = '';
       }
-      previewUrlRef.current = thumbUrl;
-      setPreviewUrl(thumbUrl);
+      setPreviewUrl(thumbDataUrl);
+    } else {
+      // Fallback to direct object URL
+      const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
+      if (isHeic) {
+        setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
+      } else {
+        const objectUrl = URL.createObjectURL(file);
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current);
+        }
+        previewUrlRef.current = objectUrl;
+        setPreviewUrl(objectUrl);
+      }
     }
 
     // 2) Run background compression and delayed AI check
     setCheckStatus('checking');
     setIsAnalyzingImage(true);
-    processSelectedImage(file, runId);
+    processSelectedImage(file, thumbDataUrl, runId);
   }, [processSelectedImage]);
 
   const handleDrop = useCallback((e) => {
@@ -1061,24 +1098,46 @@ export default function CreateMemorial() {
                   <span className="inline-block w-6 h-6 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
                   <span className="text-xs font-medium text-[#8a4f36]">Preparing photo…</span>
                 </div>
-              ) : Boolean(previewUrl && typeof previewUrl === 'string') ? (
+              ) : previewUrl ? (
                 <div className="space-y-3">
-                  <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
-                    <img
-                      src={previewUrl}
-                      alt="Pet Portrait Preview"
-                      className="w-full h-full object-cover"
-                      onError={(e) => console.error('Image preview failed to load:', e)}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleRemoveImage}
-                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs"
-                      title="Remove photo"
+                  {previewFailed ? (
+                    <div
+                      className="w-full h-56 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex flex-col items-center justify-center p-4 cursor-pointer hover:bg-[#f5efe6] transition-colors relative"
+                      onClick={() => fileInputRef.current?.click()}
                     >
-                      ✕
-                    </button>
-                  </div>
+                      <span className="material-symbols-outlined text-4xl text-[#8a4f36] mb-1">image</span>
+                      <p className="text-sm font-medium text-[#1b1c1a] truncate max-w-xs">{photo?.name || 'Photo selected'}</p>
+                      <p className="text-xs text-[#85736d] mt-1">Tap to select a different photo</p>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveImage();
+                        }}
+                        className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
+                        title="Remove photo"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
+                      <img
+                        src={previewUrl}
+                        alt="Pet Portrait Preview"
+                        className="w-full h-full object-cover"
+                        onError={() => setPreviewFailed(true)}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleRemoveImage}
+                        className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
+                        title="Remove photo"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
 
                   {/* Non-blocking image check status */}
                   {isAnalyzingImage && (
@@ -1224,14 +1283,21 @@ export default function CreateMemorial() {
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
-              {Boolean(previewUrl && typeof previewUrl === 'string') && (
+              {previewUrl && (
                 <div className="relative w-full h-48 rounded-xl overflow-hidden border border-amber-900/10">
-                  <img
-                    src={previewUrl}
-                    alt="Pet Portrait Preview"
-                    className="w-full h-full object-cover"
-                    onError={(e) => console.error('Review image preview failed to load:', e)}
-                  />
+                  {previewFailed ? (
+                    <div className="w-full h-full bg-[#fbf9f6] flex items-center justify-center gap-2 text-sm text-[#8a4f36]">
+                      <span className="material-symbols-outlined text-xl">image</span>
+                      <span>{photo?.name || 'Photo attached'}</span>
+                    </div>
+                  ) : (
+                    <img
+                      src={previewUrl}
+                      alt="Pet Portrait Preview"
+                      className="w-full h-full object-cover"
+                      onError={() => setPreviewFailed(true)}
+                    />
+                  )}
                 </div>
               )}
               <div className="space-y-2 text-sm text-[#53433e]">
