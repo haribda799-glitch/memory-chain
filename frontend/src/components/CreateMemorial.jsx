@@ -244,8 +244,6 @@ export default function CreateMemorial() {
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
-  const [previewError, setPreviewError] = useState(false);
-  const [reviewImgError, setReviewImgError] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
 
   // AI Verification State (informational only — never blocks the wizard)
@@ -267,6 +265,9 @@ export default function CreateMemorial() {
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
+  // Dedicated file input ref for reliable reset across repeated creations
+  const fileInputRef = useRef(null);
+
   // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
   const previewUrlRef = useRef('');
   useEffect(() => {
@@ -276,6 +277,24 @@ export default function CreateMemorial() {
         previewUrlRef.current = '';
       }
     };
+  }, []);
+
+  const handleRemoveImage = useCallback(() => {
+    analysisRunIdRef.current += 1;
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = '';
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setPhoto(null);
+    setPreviewUrl('');
+    setError(null);
+    setIsGeneratingPreview(false);
+    setIsAnalyzingImage(false);
+    setCheckStatus('idle');
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
   }, []);
 
   const { writeContractAsync } = useWriteContract();
@@ -327,14 +346,13 @@ export default function CreateMemorial() {
     setBirthYear('');
     setPassingYear('');
     setDescription('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
       previewUrlRef.current = '';
     }
     setPreviewUrl('');
-    setPreviewError(false);
-    setReviewImgError(false);
     setIsGeneratingPreview(false);
     setIsPublic(false);
     setIsAnalyzingImage(false);
@@ -349,8 +367,6 @@ export default function CreateMemorial() {
     setTxHash(null);
     setMintedIsPublic(false);
     setShowShareModal(false);
-    const fileInput = document.getElementById('photo-input');
-    if (fileInput) fileInput.value = '';
   }, []);
 
   // Initialize clean state and check for saved draft on mount
@@ -375,14 +391,13 @@ export default function CreateMemorial() {
       localStorage.removeItem('draft_memorial');
       setDraft(null);
       analysisRunIdRef.current += 1;
+      if (fileInputRef.current) fileInputRef.current.value = '';
       setPhoto(null);
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
         previewUrlRef.current = '';
       }
       setPreviewUrl('');
-      setPreviewError(false);
-      setReviewImgError(false);
       setIsGeneratingPreview(false);
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
@@ -473,8 +488,6 @@ export default function CreateMemorial() {
           }
           previewUrlRef.current = compressedUrl;
           setPreviewUrl(compressedUrl);
-          setPreviewError(false);
-          setReviewImgError(false);
         }
       } catch (compErr) {
         console.warn('[CreateMemorial] Safe resize error, using fallback:', compErr);
@@ -526,7 +539,7 @@ export default function CreateMemorial() {
 
     const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name || '');
     if (!looksLikeImage) {
-      setError('Пожалуйста, используйте фото в формате JPG или PNG');
+      setError('Please select a valid image file (JPG, PNG, or WebP)');
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
@@ -540,8 +553,6 @@ export default function CreateMemorial() {
 
     setPhoto(file);
     setError(null);
-    setPreviewError(false);
-    setReviewImgError(false);
     setIsGeneratingPreview(true);
 
     // Reset previous check results
@@ -562,8 +573,7 @@ export default function CreateMemorial() {
 
       const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
       if (isHeic) {
-        setError('Формат HEIC не поддерживается вашим браузером. Пожалуйста, выберите фото в формате JPG или PNG.');
-        setPreviewError(true);
+        setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
       } else {
         // Fallback to direct object URL
         thumbUrl = URL.createObjectURL(file);
@@ -1035,6 +1045,7 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input stays mounted regardless of preview state (mobile browsers dislike removing it mid-selection) */}
               <input
+                ref={fileInputRef}
                 id="photo-input"
                 type="file"
                 accept="image/*"
@@ -1046,95 +1057,28 @@ export default function CreateMemorial() {
                 }}
               />
               {isGeneratingPreview ? (
-                <div className="w-full h-48 rounded-2xl border border-[#d8c2ba]/40 bg-[#fbf9f6] flex flex-col items-center justify-center gap-3 animate-fadeIn">
+                <div className="w-full h-56 rounded-2xl border border-amber-900/10 bg-[#fbf9f6] flex flex-col items-center justify-center gap-3 animate-fadeIn">
                   <span className="inline-block w-6 h-6 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                  <span className="text-xs font-medium text-[#8a4f36]">Подготовка фото…</span>
+                  <span className="text-xs font-medium text-[#8a4f36]">Preparing photo…</span>
                 </div>
               ) : Boolean(previewUrl && typeof previewUrl === 'string') ? (
                 <div className="space-y-3">
-                  {previewError ? (
-                    <div
-                      className="w-full p-4 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex items-center justify-between gap-4 cursor-pointer hover:bg-[#f5f3f0] transition-colors"
-                      onClick={() => document.getElementById('photo-input')?.click()}
+                  <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
+                    <img
+                      src={previewUrl}
+                      alt="Pet Portrait Preview"
+                      className="w-full h-full object-cover"
+                      onError={(e) => console.error('Image preview failed to load:', e)}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleRemoveImage}
+                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs"
+                      title="Remove photo"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-[#f0e7e1] flex items-center justify-center shrink-0">
-                          <span className="material-symbols-outlined text-[#8a4f36]">image</span>
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-[#1b1c1a] truncate">
-                            Фото выбрано: {photo?.name || 'photo.jpg'}
-                          </p>
-                          <p className="text-xs text-[#85736d]">
-                            {photo?.size ? `${(photo.size / (1024 * 1024)).toFixed(1)} МБ · Нажмите, чтобы заменить` : 'Нажмите, чтобы заменить'}
-                          </p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          analysisRunIdRef.current += 1;
-                          if (previewUrlRef.current) {
-                            URL.revokeObjectURL(previewUrlRef.current);
-                            previewUrlRef.current = '';
-                          }
-                          setPhoto(null);
-                          setPreviewUrl('');
-                          setPreviewError(false);
-                          setReviewImgError(false);
-                          setIsGeneratingPreview(false);
-                          setIsAnalyzingImage(false);
-                          setCheckStatus('idle');
-                          setDetectedPerson(false);
-                          setDetectedAnimal(true);
-                          setHumanConsentGiven(false);
-                          const fileInput = document.getElementById('photo-input');
-                          if (fileInput) fileInput.value = '';
-                        }}
-                        className="text-[#85736d] hover:text-[#1b1c1a] p-1.5 shrink-0 rounded-full hover:bg-black/5 transition-colors"
-                      >
-                        <span className="material-symbols-outlined text-sm">close</span>
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="relative rounded-2xl overflow-hidden">
-                      <img
-                        src={previewUrl}
-                        alt="Pet preview"
-                        className="w-full h-48 object-cover rounded-xl"
-                        onError={(e) => {
-                          console.error('Image preview failed to load:', e);
-                          setPreviewError(true);
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          analysisRunIdRef.current += 1;
-                          if (previewUrlRef.current) {
-                            URL.revokeObjectURL(previewUrlRef.current);
-                            previewUrlRef.current = '';
-                          }
-                          setPhoto(null);
-                          setPreviewUrl('');
-                          setPreviewError(false);
-                          setReviewImgError(false);
-                          setIsGeneratingPreview(false);
-                          setIsAnalyzingImage(false);
-                          setCheckStatus('idle');
-                          setDetectedPerson(false);
-                          setDetectedAnimal(true);
-                          setHumanConsentGiven(false);
-                          const fileInput = document.getElementById('photo-input');
-                          if (fileInput) fileInput.value = '';
-                        }}
-                        className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm text-[#1b1c1a] w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors"
-                      >
-                        <span className="material-symbols-outlined text-sm">close</span>
-                      </button>
-                    </div>
-                  )}
+                      ✕
+                    </button>
+                  </div>
 
                   {/* Non-blocking image check status */}
                   {isAnalyzingImage && (
@@ -1205,11 +1149,11 @@ export default function CreateMemorial() {
                   onDrop={handleDrop}
                   onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-[#8a4f36]'); }}
                   onDragLeave={(e) => e.currentTarget.classList.remove('border-[#8a4f36]')}
-                  onClick={() => document.getElementById('photo-input')?.click()}
+                  onClick={() => fileInputRef.current?.click()}
                 >
                   <span className="material-symbols-outlined text-4xl text-[#d8c2ba] group-hover:text-[#8a4f36] transition-colors mb-2">add_photo_alternate</span>
-                  <p className="text-sm text-[#53433e]">Drag a photo here, or <span className="text-[#8a4f36] underline">browse</span></p>
-                  <p className="text-xs text-[#85736d] mt-1">JPG or PNG · photos are auto-optimized</p>
+                  <p className="text-sm text-[#53433e]">Click or drag photo to upload</p>
+                  <p className="text-xs text-[#85736d] mt-1">JPG, PNG, WebP up to 30 MB (auto-optimized)</p>
                 </div>
               )}
             </div>
@@ -1281,27 +1225,14 @@ export default function CreateMemorial() {
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
               {Boolean(previewUrl && typeof previewUrl === 'string') && (
-                reviewImgError ? (
-                  <div className="w-full p-4 rounded-xl border border-[#d8c2ba]/40 bg-[#fbf9f6] flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg bg-[#f0e7e1] flex items-center justify-center shrink-0">
-                      <span className="material-symbols-outlined text-[#8a4f36]">image</span>
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-[#1b1c1a] truncate">{photo?.name || 'Pet photo'}</p>
-                      <p className="text-xs text-[#85736d]">{photo?.size ? `${(photo.size / (1024 * 1024)).toFixed(1)} МБ` : 'Photo attached'}</p>
-                    </div>
-                  </div>
-                ) : (
+                <div className="relative w-full h-48 rounded-xl overflow-hidden border border-amber-900/10">
                   <img
                     src={previewUrl}
-                    alt="Pet preview"
-                    className="w-full max-h-48 object-cover rounded-xl"
-                    onError={(e) => {
-                      console.error('Review image preview failed to load:', e);
-                      setReviewImgError(true);
-                    }}
+                    alt="Pet Portrait Preview"
+                    className="w-full h-full object-cover"
+                    onError={(e) => console.error('Review image preview failed to load:', e)}
                   />
-                )
+                </div>
               )}
               <div className="space-y-2 text-sm text-[#53433e]">
                 <p><span className="font-semibold text-[#1b1c1a]">Name:</span> {petName || '—'}</p>
