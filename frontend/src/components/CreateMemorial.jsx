@@ -23,7 +23,93 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
+const THUMBNAIL_MAX_DIMENSION = 800;          // px, max dimension for fast initial thumbnail
+const THUMBNAIL_QUALITY = 0.75;               // fast preview quality
 const AI_CHECK_TIMEOUT_MS = 3000;             // AI check must never block longer than this
+
+/**
+ * Fast lightweight thumbnail generation (<= 800px, JPEG 0.75) for instant zero-lag preview.
+ * Prevents WebKit/Chromium decoder memory crashes on 12-48MP raw phone photos.
+ */
+async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality = THUMBNAIL_QUALITY) {
+  if (!file || !file.type?.startsWith('image/') || file.type === 'image/gif') {
+    return file;
+  }
+
+  let source = null;
+  let width = 0;
+  let height = 0;
+  let cleanup = () => {};
+
+  if (typeof createImageBitmap === 'function') {
+    try {
+      // Try resizing directly during decode if supported (WebKit / Chromium optimization)
+      const bitmap = await createImageBitmap(file, {
+        resizeWidth: maxDim,
+        resizeQuality: 'medium',
+        imageOrientation: 'from-image',
+      });
+      source = bitmap;
+      width = bitmap.width;
+      height = bitmap.height;
+      cleanup = () => bitmap.close?.();
+    } catch {
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        source = bitmap;
+        width = bitmap.width;
+        height = bitmap.height;
+        cleanup = () => bitmap.close?.();
+      } catch {
+        source = null;
+      }
+    }
+  }
+
+  if (!source) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = (err) => reject(err);
+        img.src = url;
+      });
+      source = img;
+      width = img.naturalWidth;
+      height = img.naturalHeight;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  if (!width || !height) {
+    cleanup();
+    return file;
+  }
+
+  const scale = Math.min(1, maxDim / Math.max(width, height));
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    cleanup();
+    return file;
+  }
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, targetWidth, targetHeight);
+  ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
+  cleanup();
+
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+  canvas.width = 0;
+  canvas.height = 0;
+  return blob || file;
+}
 
 /**
  * Downscale a photo via Canvas (max 1000px, JPEG 0.8) asynchronously so phone camera images
@@ -157,6 +243,9 @@ export default function CreateMemorial() {
   const [description, setDescription] = useState('');
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
+  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState(false);
+  const [reviewImgError, setReviewImgError] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
 
   // AI Verification State (informational only — never blocks the wizard)
@@ -244,6 +333,9 @@ export default function CreateMemorial() {
       previewUrlRef.current = '';
     }
     setPreviewUrl('');
+    setPreviewError(false);
+    setReviewImgError(false);
+    setIsGeneratingPreview(false);
     setIsPublic(false);
     setIsAnalyzingImage(false);
     setCheckStatus('idle');
@@ -289,6 +381,9 @@ export default function CreateMemorial() {
         previewUrlRef.current = '';
       }
       setPreviewUrl('');
+      setPreviewError(false);
+      setReviewImgError(false);
+      setIsGeneratingPreview(false);
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
       setError(null);
@@ -349,12 +444,17 @@ export default function CreateMemorial() {
     };
   }, []);
 
-  /* Background pipeline: safe resize (canvas, max 1000px, quality 0.8) → AI check (3s race).
-   * The preview is already on screen; nothing here can block the UI. */
+  /* Background pipeline: safe resize (canvas, max 1000px, quality 0.8) → delayed AI check.
+   * The lightweight thumbnail preview is already on screen; nothing here blocks the UI. */
   const processSelectedImage = useCallback(async (file, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     let tempUrl = null;
     try {
+      // 1. Give the browser 250ms to finish rendering the thumbnail in DOM & flush microtasks
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (!isCurrent()) return;
+
+      // 2. Safe background compression
       let imageToAnalyze = file;
       try {
         const compressed = await Promise.race([
@@ -365,6 +465,16 @@ export default function CreateMemorial() {
         if (compressed && compressed !== file) {
           setPhoto(compressed);
           imageToAnalyze = compressed;
+
+          // Synchronize previewUrl with the optimized compressed image
+          const compressedUrl = URL.createObjectURL(compressed);
+          if (previewUrlRef.current) {
+            URL.revokeObjectURL(previewUrlRef.current);
+          }
+          previewUrlRef.current = compressedUrl;
+          setPreviewUrl(compressedUrl);
+          setPreviewError(false);
+          setReviewImgError(false);
         }
       } catch (compErr) {
         console.warn('[CreateMemorial] Safe resize error, using fallback:', compErr);
@@ -372,6 +482,17 @@ export default function CreateMemorial() {
 
       if (!isCurrent()) return;
 
+      // 3. Separation in time: delay before TensorFlow WebGL loads weights to prevent GPU competition
+      await new Promise((resolve) => {
+        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+          window.requestIdleCallback(() => setTimeout(resolve, 150), { timeout: 800 });
+        } else {
+          setTimeout(resolve, 250);
+        }
+      });
+      if (!isCurrent()) return;
+
+      // 4. Run AI verification
       tempUrl = URL.createObjectURL(imageToAnalyze);
       const result = await Promise.race([
         runAiCheck(tempUrl).catch((err) => {
@@ -400,19 +521,10 @@ export default function CreateMemorial() {
   }, [runAiCheck]);
 
   /* ── Photo handlers ────────────────────────────────────── */
-  const handlePhotoSelect = useCallback((file) => {
+  const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
 
-    // Check for HEIC / HEIF format from mobile cameras
-    const isHeic = file.type === 'image/heic' ||
-      file.type === 'image/heif' ||
-      /\.(heic|heif)$/i.test(file.name || '');
-    if (isHeic) {
-      setError('Пожалуйста, используйте фото в формате JPG или PNG (отключите HEIF в настройках камеры)');
-      return;
-    }
-
-    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.name || '');
+    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name || '');
     if (!looksLikeImage) {
       setError('Пожалуйста, используйте фото в формате JPG или PNG');
       return;
@@ -424,24 +536,58 @@ export default function CreateMemorial() {
 
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
+    const isCurrent = () => runId === analysisRunIdRef.current;
 
-    // Release old preview URL only when a new file is chosen
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current);
-      previewUrlRef.current = '';
-    }
-
-    // 1) Instant zero-wait preview without pre-compression
-    const objectUrl = URL.createObjectURL(file);
-    previewUrlRef.current = objectUrl;
-    setPreviewUrl(objectUrl);
     setPhoto(file);
     setError(null);
+    setPreviewError(false);
+    setReviewImgError(false);
+    setIsGeneratingPreview(true);
 
-    // 2) Reset previous check results, then run background compression & non-blocking AI check
+    // Reset previous check results
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
+    setCheckStatus('idle');
+
+    // 1) Fast lightweight thumbnail generation (Thumbnail First)
+    let thumbUrl = null;
+    try {
+      const thumb = await generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY);
+      if (!isCurrent()) return;
+      thumbUrl = URL.createObjectURL(thumb);
+    } catch (thumbErr) {
+      console.warn('[CreateMemorial] Thumbnail generation failed:', thumbErr);
+      if (!isCurrent()) return;
+
+      const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
+      if (isHeic) {
+        setError('Формат HEIC не поддерживается вашим браузером. Пожалуйста, выберите фото в формате JPG или PNG.');
+        setPreviewError(true);
+      } else {
+        // Fallback to direct object URL
+        thumbUrl = URL.createObjectURL(file);
+      }
+    } finally {
+      if (isCurrent()) {
+        setIsGeneratingPreview(false);
+      }
+    }
+
+    if (!isCurrent()) {
+      if (thumbUrl) URL.revokeObjectURL(thumbUrl);
+      return;
+    }
+
+    if (thumbUrl) {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+      previewUrlRef.current = thumbUrl;
+      setPreviewUrl(thumbUrl);
+    }
+
+    // 2) Run background compression and delayed AI check
     setCheckStatus('checking');
     setIsAnalyzingImage(true);
     processSelectedImage(file, runId);
@@ -891,7 +1037,7 @@ export default function CreateMemorial() {
               <input
                 id="photo-input"
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept="image/*"
                 className="hidden"
                 onChange={(e) => {
                   handlePhotoSelect(e.target.files?.[0]);
@@ -899,36 +1045,96 @@ export default function CreateMemorial() {
                   e.target.value = '';
                 }}
               />
-              {Boolean(previewUrl && typeof previewUrl === 'string') ? (
+              {isGeneratingPreview ? (
+                <div className="w-full h-48 rounded-2xl border border-[#d8c2ba]/40 bg-[#fbf9f6] flex flex-col items-center justify-center gap-3 animate-fadeIn">
+                  <span className="inline-block w-6 h-6 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+                  <span className="text-xs font-medium text-[#8a4f36]">Подготовка фото…</span>
+                </div>
+              ) : Boolean(previewUrl && typeof previewUrl === 'string') ? (
                 <div className="space-y-3">
-                  <div className="relative rounded-2xl overflow-hidden">
-                    <img
-                      src={previewUrl}
-                      alt="Pet preview"
-                      className="w-full h-48 object-cover rounded-xl"
-                      onError={(e) => console.error('Image preview failed to load:', e)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        analysisRunIdRef.current += 1;
-                        if (previewUrlRef.current) {
-                          URL.revokeObjectURL(previewUrlRef.current);
-                          previewUrlRef.current = '';
-                        }
-                        setPhoto(null);
-                        setPreviewUrl('');
-                        setIsAnalyzingImage(false);
-                        setCheckStatus('idle');
-                        setDetectedPerson(false);
-                        setDetectedAnimal(true);
-                        setHumanConsentGiven(false);
-                      }}
-                      className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm text-[#1b1c1a] w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors"
+                  {previewError ? (
+                    <div
+                      className="w-full p-4 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex items-center justify-between gap-4 cursor-pointer hover:bg-[#f5f3f0] transition-colors"
+                      onClick={() => document.getElementById('photo-input')?.click()}
                     >
-                      <span className="material-symbols-outlined text-sm">close</span>
-                    </button>
-                  </div>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-[#f0e7e1] flex items-center justify-center shrink-0">
+                          <span className="material-symbols-outlined text-[#8a4f36]">image</span>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-[#1b1c1a] truncate">
+                            Фото выбрано: {photo?.name || 'photo.jpg'}
+                          </p>
+                          <p className="text-xs text-[#85736d]">
+                            {photo?.size ? `${(photo.size / (1024 * 1024)).toFixed(1)} МБ · Нажмите, чтобы заменить` : 'Нажмите, чтобы заменить'}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          analysisRunIdRef.current += 1;
+                          if (previewUrlRef.current) {
+                            URL.revokeObjectURL(previewUrlRef.current);
+                            previewUrlRef.current = '';
+                          }
+                          setPhoto(null);
+                          setPreviewUrl('');
+                          setPreviewError(false);
+                          setReviewImgError(false);
+                          setIsGeneratingPreview(false);
+                          setIsAnalyzingImage(false);
+                          setCheckStatus('idle');
+                          setDetectedPerson(false);
+                          setDetectedAnimal(true);
+                          setHumanConsentGiven(false);
+                          const fileInput = document.getElementById('photo-input');
+                          if (fileInput) fileInput.value = '';
+                        }}
+                        className="text-[#85736d] hover:text-[#1b1c1a] p-1.5 shrink-0 rounded-full hover:bg-black/5 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm">close</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative rounded-2xl overflow-hidden">
+                      <img
+                        src={previewUrl}
+                        alt="Pet preview"
+                        className="w-full h-48 object-cover rounded-xl"
+                        onError={(e) => {
+                          console.error('Image preview failed to load:', e);
+                          setPreviewError(true);
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          analysisRunIdRef.current += 1;
+                          if (previewUrlRef.current) {
+                            URL.revokeObjectURL(previewUrlRef.current);
+                            previewUrlRef.current = '';
+                          }
+                          setPhoto(null);
+                          setPreviewUrl('');
+                          setPreviewError(false);
+                          setReviewImgError(false);
+                          setIsGeneratingPreview(false);
+                          setIsAnalyzingImage(false);
+                          setCheckStatus('idle');
+                          setDetectedPerson(false);
+                          setDetectedAnimal(true);
+                          setHumanConsentGiven(false);
+                          const fileInput = document.getElementById('photo-input');
+                          if (fileInput) fileInput.value = '';
+                        }}
+                        className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm text-[#1b1c1a] w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm">close</span>
+                      </button>
+                    </div>
+                  )}
 
                   {/* Non-blocking image check status */}
                   {isAnalyzingImage && (
@@ -1075,12 +1281,27 @@ export default function CreateMemorial() {
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
               {Boolean(previewUrl && typeof previewUrl === 'string') && (
-                <img
-                  src={previewUrl}
-                  alt="Pet preview"
-                  className="w-full max-h-48 object-cover rounded-xl"
-                  onError={(e) => console.error('Review image preview failed to load:', e)}
-                />
+                reviewImgError ? (
+                  <div className="w-full p-4 rounded-xl border border-[#d8c2ba]/40 bg-[#fbf9f6] flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-[#f0e7e1] flex items-center justify-center shrink-0">
+                      <span className="material-symbols-outlined text-[#8a4f36]">image</span>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-[#1b1c1a] truncate">{photo?.name || 'Pet photo'}</p>
+                      <p className="text-xs text-[#85736d]">{photo?.size ? `${(photo.size / (1024 * 1024)).toFixed(1)} МБ` : 'Photo attached'}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <img
+                    src={previewUrl}
+                    alt="Pet preview"
+                    className="w-full max-h-48 object-cover rounded-xl"
+                    onError={(e) => {
+                      console.error('Review image preview failed to load:', e);
+                      setReviewImgError(true);
+                    }}
+                  />
+                )
               )}
               <div className="space-y-2 text-sm text-[#53433e]">
                 <p><span className="font-semibold text-[#1b1c1a]">Name:</span> {petName || '—'}</p>
