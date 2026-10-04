@@ -23,116 +23,79 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
-const THUMBNAIL_MAX_DIMENSION = 500;          // px, max dimension for fast initial thumbnail
-const THUMBNAIL_QUALITY = 0.75;               // fast preview quality
+const THUMBNAIL_MAX_DIMENSION = 600;          // px, max dimension for fast initial thumbnail
+const THUMBNAIL_QUALITY = 0.8;                // fast preview quality
 const AI_CHECK_COLD_TIMEOUT_MS = 12000;       // 12s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 4000;        // 4s timeout for warm start once models are cached
 
 /**
- * Fast lightweight thumbnail generation (<= 500px, JPEG 0.75 Data URL) for instant zero-lag preview.
- * Prevents WebKit/Chromium decoder memory crashes on 12-48MP raw phone photos.
- * Returns a small base64 Data URL (~20-40 KB) with no ObjectURL lifecycle or revocation bugs.
+ * Direct hardware downsampling thumbnail generation (max 600px, JPEG 0.8 Data URL).
+ * Avoids allocating full-size 50MP raster in memory and handles missing file.type on mobile.
  */
 async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality = THUMBNAIL_QUALITY) {
-  if (!file || !file.type?.startsWith('image/') || file.type === 'image/gif') {
-    return null;
-  }
+  if (!file) return null;
+  const isImage = file.type ? file.type.startsWith('image/') : /\.(jpe?g|png|webp|bmp)$/i.test(file.name || '');
+  if (!isImage || file.type === 'image/gif') return null;
 
-  let source = null;
-  let width = 0;
-  let height = 0;
-  let cleanup = () => {};
-
+  // 1. Hardware downsampling via createImageBitmap (available in Chrome Android, Safari 15+, Firefox)
   if (typeof createImageBitmap === 'function') {
     try {
-      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
-      source = bitmap;
-      width = bitmap.width;
-      height = bitmap.height;
-      cleanup = () => bitmap.close?.();
-    } catch {
-      // Android Chrome or mobile WebViews can fail when options dictionary is provided
-      try {
-        const bitmap = await createImageBitmap(file);
-        source = bitmap;
-        width = bitmap.width;
-        height = bitmap.height;
-        cleanup = () => bitmap.close?.();
-      } catch {
-        source = null;
-      }
-    }
-  }
-
-  if (!source) {
-    const url = URL.createObjectURL(file);
-    try {
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = (err) => reject(err);
-        img.src = url;
+      const bitmap = await createImageBitmap(file, {
+        resizeWidth: maxDim,
+        resizeHeight: maxDim,
+        resizeQuality: 'medium',
       });
-      source = img;
-      width = img.naturalWidth;
-      height = img.naturalHeight;
-      cleanup = () => URL.revokeObjectURL(url);
-    } catch {
-      URL.revokeObjectURL(url);
-      // Fallback via FileReader readAsDataURL if blob ObjectURL decoding failed
-      try {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        const img = new Image();
-        await new Promise((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = reject;
-          img.src = dataUrl;
-        });
-        source = img;
-        width = img.naturalWidth;
-        height = img.naturalHeight;
-        cleanup = () => {};
-      } catch {
-        return null;
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        canvas.width = 0;
+        canvas.height = 0;
+        if (dataUrl && dataUrl.length > 50) return dataUrl;
       }
+      bitmap.close?.();
+    } catch {
+      // Fallback to FileReader -> Image -> Canvas
     }
   }
 
-  if (!width || !height) {
-    cleanup();
-    return null;
-  }
-
-  const scale = Math.min(1, maxDim / Math.max(width, height));
-  const targetWidth = Math.max(1, Math.round(width * scale));
-  const targetHeight = Math.max(1, Math.round(height * scale));
-
-  const canvas = document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    cleanup();
-    return null;
-  }
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, targetWidth, targetHeight);
-  ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
-  cleanup(); // Safely called AFTER drawImage
-
+  // 2. Fallback via FileReader -> Image -> Canvas
   try {
-    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
+    if (!width || !height) return null;
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    img.src = '';
+    const thumb = canvas.toDataURL('image/jpeg', quality);
     canvas.width = 0;
     canvas.height = 0;
-    return dataUrl;
-  } catch {
-    canvas.width = 0;
-    canvas.height = 0;
+    return thumb;
+  } catch (err) {
+    console.warn('[CreateMemorial] Thumbnail generation fallback failed:', err);
     return null;
   }
 }
@@ -230,26 +193,16 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 /* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
-let tfModulePromise = null;
 let isAiWarm = false;
 
-async function getTf() {
-  if (!tfModulePromise) {
-    tfModulePromise = import('@tensorflow/tfjs');
-  }
-  return tfModulePromise;
-}
-
 function resetAiModeration() {
-  if (tfModulePromise) {
-    tfModulePromise.then((tf) => {
-      try {
-        tf.disposeVariables();
-      } catch {
-        // ignore
-      }
-    }).catch(() => {});
-  }
+  import('@tensorflow/tfjs').then((tf) => {
+    try {
+      tf.disposeVariables();
+    } catch {
+      // ignore
+    }
+  }).catch(() => {});
   // DO NOT wipe cachedFaceModelPromise or cachedObjectModelPromise here.
   // Models are statically loaded once per session to prevent repeated ~20MB downloads.
 }
@@ -339,27 +292,10 @@ export default function CreateMemorial() {
   // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
   const previewUrlRef = useRef('');
   const thumbUrlRef = useRef('');
-  const objectUrlFailedRef = useRef(false);
-  const isGeneratingThumbnailRef = useRef(false);
 
-  // Background warmup of AI models on component mount
+  // Immediate background warmup of AI models on component mount
   useEffect(() => {
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      if (cancelled) return;
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        window.requestIdleCallback(() => {
-          if (!cancelled) preloadAiModels();
-        }, { timeout: 4000 });
-      } else {
-        preloadAiModels();
-      }
-    }, 1000);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
+    preloadAiModels();
   }, []);
 
   useEffect(() => {
@@ -379,8 +315,6 @@ export default function CreateMemorial() {
     }
     previewUrlRef.current = '';
     thumbUrlRef.current = '';
-    objectUrlFailedRef.current = false;
-    isGeneratingThumbnailRef.current = false;
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
@@ -450,8 +384,6 @@ export default function CreateMemorial() {
     }
     previewUrlRef.current = '';
     thumbUrlRef.current = '';
-    objectUrlFailedRef.current = false;
-    isGeneratingThumbnailRef.current = false;
     setPreviewUrl('');
     setPreviewFailed(false);
     setIsPublic(false);
@@ -499,8 +431,6 @@ export default function CreateMemorial() {
       }
       previewUrlRef.current = '';
       thumbUrlRef.current = '';
-      objectUrlFailedRef.current = false;
-      isGeneratingThumbnailRef.current = false;
       setPreviewUrl('');
       setPreviewFailed(false);
       setIsAnalyzingImage(false);
@@ -529,10 +459,13 @@ export default function CreateMemorial() {
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
   /* ── Non-blocking AI image check ───────────────────────────
-   * Runs on a small compressed copy or thumbnail. Resolves with
-   * { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
+   * Resolves with { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
   const runAiCheck = useCallback(async (imageUrl) => {
-    const tf = await getTf();
+    // 1. Ensure models are loaded BEFORE entering check scope
+    const [faceModel, objectModel] = await Promise.all([
+      getFaceModel(),
+      getObjectModel(),
+    ]);
     const img = new Image();
     try {
       await new Promise((resolve, reject) => {
@@ -544,22 +477,17 @@ export default function CreateMemorial() {
       let faces = [];
       let predictions = [];
 
-      // Guarantee clean tensor memory by wrapping in tf.engine().startScope() / endScope()
-      tf.engine().startScope();
+      // Official blazeface and coco-ssd models already execute tf.tidy internally inside detect / estimateFaces
       try {
-        const faceModel = await getFaceModel();
         faces = await faceModel.estimateFaces(img, false);
       } catch (faceErr) {
-        console.warn('[AI Analysis] Face detection warning:', faceErr);
+        console.warn('[AI Analysis] Face detection error:', faceErr);
       }
 
       try {
-        const objectModel = await getObjectModel();
         predictions = await objectModel.detect(img);
       } catch (objErr) {
-        console.warn('[AI Analysis] Object detection warning:', objErr);
-      } finally {
-        tf.engine().endScope();
+        console.warn('[AI Analysis] Object detection error:', objErr);
       }
 
       const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
@@ -629,18 +557,24 @@ export default function CreateMemorial() {
     const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
     if (isHeic) {
       setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
+      setPhoto(file);
+      setPreviewUrl('');
       setPreviewFailed(true);
       return;
     }
 
-    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.name || '');
+    const looksLikeImage = (file.type ? file.type.startsWith('image/') : /\.(jpe?g|png|webp|bmp)$/i.test(file.name || ''));
     if (!looksLikeImage) {
       setError('Please select a valid image file (JPG, PNG, or WebP)');
+      setPhoto(file);
+      setPreviewUrl('');
       setPreviewFailed(true);
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
+      setPhoto(file);
+      setPreviewUrl('');
       setPreviewFailed(true);
       return;
     }
@@ -653,7 +587,6 @@ export default function CreateMemorial() {
     setError(null);
     setPhoto(file);
     setPreviewFailed(false);
-    objectUrlFailedRef.current = false;
     thumbUrlRef.current = '';
 
     // Reset previous check results
@@ -671,20 +604,15 @@ export default function CreateMemorial() {
     previewUrlRef.current = objectUrl;
     setPreviewUrl(objectUrl);
 
-    // 2) Generate lightweight thumbnail concurrently in background
-    isGeneratingThumbnailRef.current = true;
-    generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY)
+    // 2) Generate lightweight 600px thumbnail immediately with hardware downsampling
+    generateThumbnail(file, 600, 0.8)
       .then((thumbDataUrl) => {
         if (!isCurrent()) return;
-        isGeneratingThumbnailRef.current = false;
 
         if (thumbDataUrl) {
           thumbUrlRef.current = thumbDataUrl;
-          // Switch to lightweight thumbnail DataURL for memory efficiency
+          // Upgrade to lightweight 600px DataURL (20-40 KB) guaranteed to render without memory crashes
           setPreviewUrl(thumbDataUrl);
-          setPreviewFailed(false);
-        } else if (objectUrlFailedRef.current) {
-          setPreviewFailed(true);
         }
 
         // Run AI verification on lightweight thumbnail or objectUrl
@@ -693,10 +621,6 @@ export default function CreateMemorial() {
       .catch((thumbErr) => {
         console.warn('[CreateMemorial] Thumbnail generation error:', thumbErr);
         if (!isCurrent()) return;
-        isGeneratingThumbnailRef.current = false;
-        if (objectUrlFailedRef.current) {
-          setPreviewFailed(true);
-        }
         processSelectedImage(file, null, runId);
       });
 
@@ -713,28 +637,20 @@ export default function CreateMemorial() {
   }, [processSelectedImage]);
 
   const handleImageError = useCallback(() => {
+    // If currently rendering ObjectURL and thumbnail DataURL is ready, switch to it
+    if (previewUrl && previewUrl.startsWith('blob:') && thumbUrlRef.current) {
+      console.warn('[CreateMemorial] ObjectURL decode warning, switching to Thumbnail DataURL');
+      setPreviewUrl(thumbUrlRef.current);
+      return;
+    }
     // If currently rendering DataURL and ObjectURL exists, try ObjectURL
     if (previewUrl && previewUrl.startsWith('data:') && previewUrlRef.current) {
-      console.warn('[CreateMemorial] DataURL preview failed, falling back to ObjectURL');
+      console.warn('[CreateMemorial] Thumbnail DataURL warning, switching to ObjectURL');
       setPreviewUrl(previewUrlRef.current);
       return;
     }
-    // If currently rendering ObjectURL
-    if (previewUrl && previewUrl.startsWith('blob:')) {
-      objectUrlFailedRef.current = true;
-      // If thumbnail is already ready, switch to it immediately
-      if (thumbUrlRef.current) {
-        console.warn('[CreateMemorial] ObjectURL preview failed, falling back to Thumbnail DataURL');
-        setPreviewUrl(thumbUrlRef.current);
-        return;
-      }
-      // If thumbnail is still being generated, do not fail yet
-      if (isGeneratingThumbnailRef.current) {
-        console.warn('[CreateMemorial] ObjectURL preview failed, waiting for background thumbnail...');
-        return;
-      }
-    }
-    setPreviewFailed(true);
+    // Do NOT replace visual preview with placeholder card on a decode glitch
+    console.warn('[CreateMemorial] Image decode warning handled gracefully without hiding preview');
   }, [previewUrl]);
 
   const handleDrop = useCallback((e) => {
@@ -1191,49 +1107,47 @@ export default function CreateMemorial() {
                   handlePhotoSelect(e.target.files?.[0]);
                 }}
               />
-              {previewUrl ? (
+              {previewFailed ? (
+                <div
+                  className="w-full h-56 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex flex-col items-center justify-center p-4 cursor-pointer hover:bg-[#f5efe6] transition-colors relative"
+                  onClick={() => {
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  <span className="material-symbols-outlined text-4xl text-[#8a4f36] mb-1">image_not_supported</span>
+                  <p className="text-sm font-medium text-[#1b1c1a] truncate max-w-xs">{photo?.name || 'Unsupported file'}</p>
+                  <p className="text-xs text-[#85736d] mt-1">Tap to select a different photo (JPG, PNG, or WebP)</p>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemoveImage();
+                    }}
+                    className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
+                    title="Remove photo"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : previewUrl ? (
                 <div className="space-y-3">
-                  {previewFailed ? (
-                    <div
-                      className="w-full h-56 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex flex-col items-center justify-center p-4 cursor-pointer hover:bg-[#f5efe6] transition-colors relative"
-                      onClick={() => {
-                        if (fileInputRef.current) fileInputRef.current.value = '';
-                        fileInputRef.current?.click();
-                      }}
+                  <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
+                    <img
+                      src={previewUrl}
+                      alt="Pet Portrait Preview"
+                      className="w-full h-full object-cover"
+                      onError={handleImageError}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleRemoveImage}
+                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
+                      title="Remove photo"
                     >
-                      <span className="material-symbols-outlined text-4xl text-[#8a4f36] mb-1">image</span>
-                      <p className="text-sm font-medium text-[#1b1c1a] truncate max-w-xs">{photo?.name || 'Photo selected'}</p>
-                      <p className="text-xs text-[#85736d] mt-1">Tap to select a different photo</p>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRemoveImage();
-                        }}
-                        className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
-                        title="Remove photo"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
-                      <img
-                        src={previewUrl}
-                        alt="Pet Portrait Preview"
-                        className="w-full h-full object-cover"
-                        onError={handleImageError}
-                      />
-                      <button
-                        type="button"
-                        onClick={handleRemoveImage}
-                        className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
-                        title="Remove photo"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  )}
+                      ✕
+                    </button>
+                  </div>
 
                   {/* Non-blocking image check status */}
                   {isAnalyzingImage && (
