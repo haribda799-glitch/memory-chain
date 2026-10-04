@@ -26,6 +26,98 @@ const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 
 const AI_CHECK_COLD_TIMEOUT_MS = 12000;       // 12s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 4000;        // 4s timeout for warm start once models are cached
 
+const THUMBNAIL_MAX_DIM = 800;
+const THUMBNAIL_QUALITY = 0.85;
+
+/**
+ * Universal 3-tier proportional thumbnail generator (Data URL max 800px).
+ * Preserves exact aspect ratio, uses hardware downsampling where supported,
+ * and falls back safely on iOS Safari.
+ */
+async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THUMBNAIL_QUALITY) {
+  if (!file) return null;
+  const isImage = Boolean(
+    file.type?.startsWith('image/') ||
+    /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || '')
+  );
+  if (!isImage || file.type === 'image/gif') return null;
+  // Tier 1: Hardware downsampling via createImageBitmap (Android Chrome, Desktop Chrome/Firefox/Edge)
+  if (typeof createImageBitmap === 'function') {
+    try {
+      // 1. Get original dimensions without retaining heavy buffer
+      const probe = await createImageBitmap(file);
+      const origW = probe.width;
+      const origH = probe.height;
+      probe.close?.();
+      if (origW > 0 && origH > 0) {
+        const scale = Math.min(1, maxDim / Math.max(origW, origH));
+        const targetW = Math.max(1, Math.round(origW * scale));
+        const targetH = Math.max(1, Math.round(origH * scale));
+        const resizedBitmap = await createImageBitmap(file, {
+          resizeWidth: targetW,
+          resizeHeight: targetH,
+          resizeQuality: 'medium',
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(resizedBitmap, 0, 0);
+          resizedBitmap.close?.();
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          canvas.width = 0;
+          canvas.height = 0;
+          if (dataUrl && dataUrl.length > 50) return dataUrl;
+        }
+        resizedBitmap.close?.();
+      }
+    } catch {
+      // Fall through to Tier 2 (e.g. iOS Safari throws TypeError on options dictionary)
+    }
+  }
+  // Tier 2: Universal FileReader -> Image -> Canvas (iOS Safari, older mobile browsers)
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+    const origW = img.naturalWidth || img.width;
+    const origH = img.naturalHeight || img.height;
+    if (origW > 0 && origH > 0) {
+      const scale = Math.min(1, maxDim / Math.max(origW, origH));
+      const targetW = Math.max(1, Math.round(origW * scale));
+      const targetH = Math.max(1, Math.round(origH * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        img.src = '';
+        const thumb = canvas.toDataURL('image/jpeg', quality);
+        canvas.width = 0;
+        canvas.height = 0;
+        return thumb;
+      }
+    }
+  } catch (fallbackErr) {
+    console.warn('[CreateMemorial] Thumbnail generation fallback note:', fallbackErr);
+  }
+  // Tier 3: Direct ObjectURL if canvas downscaling is unavailable
+  return null;
+}
+
 /**
  * Downscale a photo via Canvas (max 1000px, JPEG 0.8) asynchronously so phone camera images
  * (10+ MB) don't exhaust browser memory or Arweave storage.
@@ -241,7 +333,6 @@ export default function CreateMemorial() {
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-    resetAiModeration();
   }, []);
 
   const { writeContractAsync } = useWriteContract();
@@ -472,14 +563,13 @@ export default function CreateMemorial() {
     }
   }, [runAiCheck]);
 
-  /* ── Photo handlers ────────────────────────────────────── */
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
-
-    // Allow all image types, including HEIC/HEIF from iPhone:
+    // Multiplatform image validation (Android, iOS HEIC, Desktop)
     const looksLikeImage = Boolean(
       file.type?.startsWith('image/') ||
-      /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '')
+      /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '') ||
+      (!file.type && file.size > 0)
     );
     if (!looksLikeImage) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
@@ -489,34 +579,45 @@ export default function CreateMemorial() {
       setError('Photo must be under 30 MB');
       return;
     }
-
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
-
-    // 1. Reset states
     setError(null);
     setPhoto(file);
-
-    // Reset previous check results
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-
-    // 2. Instant preview via reliable ObjectURL
-    const objectUrl = URL.createObjectURL(file);
-    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-      URL.revokeObjectURL(previewUrlRef.current);
-    }
-    previewUrlRef.current = objectUrl;
-    setPreviewUrl(objectUrl);
-
-    // 3. Launch background AI check and background compression for Arweave
     setCheckStatus('checking');
     setIsAnalyzingImage(true);
-    processSelectedImage(file, objectUrl, runId);
 
-    // Background safe compression for Arweave payload (never blocks preview or UI)
+    // 1. Generate lightweight proportional Data URL preview
+    let thumbUrl = null;
+    try {
+      thumbUrl = await generateThumbnail(file);
+    } catch (e) {
+      console.warn('[CreateMemorial] Thumbnail error:', e);
+    }
+    if (!isCurrent()) return;
+    if (thumbUrl) {
+      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+      previewUrlRef.current = thumbUrl;
+      setPreviewUrl(thumbUrl);
+    } else {
+      // Fallback to object URL if thumbnail generation failed
+      const objectUrl = URL.createObjectURL(file);
+      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+      previewUrlRef.current = objectUrl;
+      setPreviewUrl(objectUrl);
+    }
+
+    // 2. Run non-blocking AI verification on the lightweight thumbnail or file
+    processSelectedImage(file, thumbUrl || previewUrlRef.current, runId);
+
+    // 3. Background safe compression for Arweave payload
     resizeImage(file, 1000, 1000, COMPRESSION_QUALITY)
       .then((compressed) => {
         if (isCurrent() && compressed && compressed !== file) {
@@ -989,13 +1090,16 @@ export default function CreateMemorial() {
                   clip: 'rect(0,0,0,0)',
                   border: 0,
                 }}
+                onClick={(e) => {
+                  // Resetting value on click allows re-selecting the exact same file without killing the stream
+                  e.target.value = '';
+                }}
                 onChange={(e) => {
                   const selectedFile = e.target.files?.[0];
                   if (selectedFile) {
                     handlePhotoSelect(selectedFile);
                   }
-                  // Reset value so selecting the SAME file again triggers onChange
-                  e.target.value = '';
+                  // NEVER call e.target.value = '' here!
                 }}
               />
               {previewUrl ? (
