@@ -19,6 +19,75 @@ const STEPS = ['Basic Info', 'Story', 'Preservation'];
 const inputBase = 'w-full bg-transparent border-b border-[#d8c2ba] focus:border-[#8a4f36] focus:ring-0 outline-none px-0 py-2 text-[18px] leading-7 text-[#1b1c1a] placeholder-[#85736d] transition-colors';
 const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase text-[#53433e] mb-2';
 
+/* ── Photo processing constants ───────────────────────────── */
+const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
+const MAX_IMAGE_DIMENSION = 1200;             // px, longest side after compression
+const AI_CHECK_TIMEOUT_MS = 3000;             // AI check must never block longer than this
+
+/**
+ * Downscale a photo via Canvas (max 1200px, JPEG 0.85) so phone camera images
+ * (10+ MB) don't exhaust browser memory. Falls back to the original file on
+ * any failure (e.g. HEIC the browser cannot decode) and never throws.
+ */
+async function compressImage(file, maxDim = MAX_IMAGE_DIMENSION, quality = 0.85) {
+  try {
+    if (!file.type?.startsWith('image/') || file.type === 'image/gif') return file;
+
+    let source;
+    let width;
+    let height;
+    let cleanup = () => {};
+
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        source = bitmap;
+        width = bitmap.width;
+        height = bitmap.height;
+        cleanup = () => bitmap.close?.();
+      } catch {
+        source = null;
+      }
+    }
+
+    if (!source) {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('decode failed'));
+        img.src = url;
+      }).finally(() => URL.revokeObjectURL(url));
+      source = img;
+      width = img.naturalWidth;
+      height = img.naturalHeight;
+    }
+
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    if (scale === 1 && file.size <= 2 * 1024 * 1024) { cleanup(); return file; }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; // JPEG has no alpha — avoid black backgrounds for PNGs
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    cleanup();
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    canvas.width = 0;
+    canvas.height = 0;
+    if (!blob || blob.size >= file.size) return file;
+
+    const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
+    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+  } catch (err) {
+    console.warn('[CreateMemorial] Image compression skipped:', err?.message || err);
+    return file;
+  }
+}
+
 /* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
@@ -70,11 +139,12 @@ export default function CreateMemorial() {
   const [passingYear, setPassingYear] = useState('');
   const [description, setDescription] = useState('');
   const [photo, setPhoto] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState('');
+  const [previewUrl, setPreviewUrl] = useState('');
   const [isPublic, setIsPublic] = useState(false);
 
-  // AI Verification State
+  // AI Verification State (informational only — never blocks the wizard)
   const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+  const [checkStatus, setCheckStatus] = useState('idle'); // idle | checking | accepted | skipped
   const [detectedPerson, setDetectedPerson] = useState(false);
   const [detectedAnimal, setDetectedAnimal] = useState(true);
   const [humanConsentGiven, setHumanConsentGiven] = useState(false);
@@ -90,6 +160,23 @@ export default function CreateMemorial() {
 
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
+
+  // Current preview object URL, kept in a ref so it can always be revoked
+  const previewUrlRef = useRef('');
+  useEffect(() => () => {
+    analysisRunIdRef.current += 1;
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = '';
+    }
+  }, []);
+
+  const revokePreviewUrl = useCallback(() => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = '';
+    }
+  }, []);
 
   const { writeContractAsync } = useWriteContract();
   const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
@@ -141,9 +228,11 @@ export default function CreateMemorial() {
     setPassingYear('');
     setDescription('');
     setPhoto(null);
-    setPhotoPreview('');
+    revokePreviewUrl();
+    setPreviewUrl('');
     setIsPublic(false);
     setIsAnalyzingImage(false);
+    setCheckStatus('idle');
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
@@ -156,7 +245,7 @@ export default function CreateMemorial() {
     setShowShareModal(false);
     const fileInput = document.getElementById('photo-input');
     if (fileInput) fileInput.value = '';
-  }, []);
+  }, [revokePreviewUrl]);
 
   // Initialize clean state and check for saved draft on mount
   useEffect(() => {
@@ -181,11 +270,13 @@ export default function CreateMemorial() {
       setDraft(null);
       analysisRunIdRef.current += 1;
       setPhoto(null);
-      setPhotoPreview('');
+      revokePreviewUrl();
+      setPreviewUrl('');
       setIsAnalyzingImage(false);
+      setCheckStatus('idle');
       setError('');
     }
-  }, [isSuccess]);
+  }, [isSuccess, revokePreviewUrl]);
 
   // Read creation_fee from contract
   const { data: creationFeeRaw, refetch: refetchCreationFee } = useReadContract({
@@ -205,117 +296,108 @@ export default function CreateMemorial() {
 
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
-  /* ── AI Image Analysis with 7s timeout & fallback ──────── */
-  const analyzeImage = useCallback(async (imageSrc, runId) => {
-    setIsAnalyzingImage(true);
-    setDetectedPerson(false);
-    setDetectedAnimal(true);
-    setHumanConsentGiven(false);
+  /* ── Non-blocking AI image check ───────────────────────────
+   * Runs on a small compressed copy. Resolves with
+   * { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
+  const runAiCheck = useCallback(async (imageUrl) => {
+    await import('@tensorflow/tfjs');
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
+      img.src = imageUrl;
+    });
 
-    let isDone = false;
-    const timer = setTimeout(() => {
-      if (!isDone && runId === analysisRunIdRef.current) {
-        console.warn('[AI Analysis] Analysis timed out (7s limit), bypassing check.');
-        setIsAnalyzingImage(false);
-        setDetectedPerson(false);
-        setDetectedAnimal(true);
-      }
-    }, 7000);
-
+    let faces = [];
+    let predictions = [];
     try {
-      await import('@tensorflow/tfjs');
-      if (runId !== analysisRunIdRef.current) return;
-
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      await new Promise((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
-        img.src = imageSrc;
-      });
-
-      if (runId !== analysisRunIdRef.current) return;
-
-      let faces = [];
-      let predictions = [];
-
-      try {
-        const faceModel = await getFaceModel();
-        if (runId === analysisRunIdRef.current) {
-          faces = await faceModel.estimateFaces(img, false);
-        }
-      } catch (faceErr) {
-        cachedFaceModelPromise = null;
-        console.warn('[AI Analysis] Face detection warning:', faceErr);
-      }
-
-      if (runId !== analysisRunIdRef.current) return;
-
-      try {
-        const objectModel = await getObjectModel();
-        if (runId === analysisRunIdRef.current) {
-          predictions = await objectModel.detect(img);
-        }
-      } catch (objErr) {
-        cachedObjectModelPromise = null;
-        console.warn('[AI Analysis] Object detection warning:', objErr);
-      }
-
-      if (runId !== analysisRunIdRef.current) return;
-
-      const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-      const hasPerson = (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35);
-      const hasAnimal = predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20);
-
-      setDetectedPerson(hasPerson);
-      setDetectedAnimal(hasAnimal);
-    } catch (err) {
-      console.warn('[AI Analysis] ML error or abort, bypassing check:', err?.message || err);
-      if (runId === analysisRunIdRef.current) {
-        setDetectedPerson(false);
-        setDetectedAnimal(true);
-      }
-    } finally {
-      isDone = true;
-      clearTimeout(timer);
-      if (runId === analysisRunIdRef.current) {
-        setIsAnalyzingImage(false);
-      }
+      const faceModel = await getFaceModel();
+      faces = await faceModel.estimateFaces(img, false);
+    } catch (faceErr) {
+      cachedFaceModelPromise = null;
+      console.warn('[AI Analysis] Face detection warning:', faceErr);
     }
+    try {
+      const objectModel = await getObjectModel();
+      predictions = await objectModel.detect(img);
+    } catch (objErr) {
+      cachedObjectModelPromise = null;
+      console.warn('[AI Analysis] Object detection warning:', objErr);
+    }
+
+    const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
+    return {
+      hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
+      hasAnimal: predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
+    };
   }, []);
 
-  /* ── Photo handlers with reliable FileReader ──────────── */
+  /* Background pipeline: compress (canvas, max 1200px) → AI check (3s race).
+   * The preview is already on screen; nothing here can block the UI. */
+  const processSelectedImage = useCallback(async (file, runId) => {
+    const isCurrent = () => runId === analysisRunIdRef.current;
+    let tempUrl = null;
+    try {
+      const compressed = await Promise.race([
+        compressImage(file),
+        new Promise((resolve) => setTimeout(() => resolve(file), 5000)),
+      ]);
+      if (!isCurrent()) return;
+      if (compressed !== file) setPhoto(compressed);
+
+      tempUrl = URL.createObjectURL(compressed);
+      const result = await Promise.race([
+        runAiCheck(tempUrl).catch((err) => {
+          console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
+          return null;
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(null), AI_CHECK_TIMEOUT_MS)),
+      ]);
+      if (!isCurrent()) return;
+
+      if (result) {
+        setDetectedPerson(result.hasPerson);
+        setDetectedAnimal(result.hasAnimal);
+        setCheckStatus('accepted');
+      } else {
+        console.warn('[AI Analysis] Timed out or unavailable — check skipped.');
+        setCheckStatus('skipped');
+      }
+    } catch (err) {
+      console.warn('[CreateMemorial] Image processing error, check skipped:', err?.message || err);
+      if (isCurrent()) setCheckStatus('skipped');
+    } finally {
+      if (tempUrl) URL.revokeObjectURL(tempUrl);
+      if (isCurrent()) setIsAnalyzingImage(false);
+    }
+  }, [runAiCheck]);
+
+  /* ── Photo handlers ────────────────────────────────────── */
   const handlePhotoSelect = useCallback((file) => {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) { setError('Photo must be under 10 MB'); return; }
-
-    setError('');
-    setPhoto(file);
+    const looksLikeImage = file.type?.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name || '');
+    if (!looksLikeImage) { setError('Please select a valid image file'); return; }
+    if (file.size > MAX_RAW_PHOTO_BYTES) { setError('Photo must be under 30 MB'); return; }
 
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result;
-      if (typeof dataUrl === 'string') {
-        setPhotoPreview(dataUrl);
-        analyzeImage(dataUrl, runId);
-      }
-    };
-    reader.onerror = (readErr) => {
-      console.warn('[CreateMemorial] FileReader error, using createObjectURL fallback:', readErr);
-      try {
-        const objectUrl = URL.createObjectURL(file);
-        setPhotoPreview(objectUrl);
-        analyzeImage(objectUrl, runId);
-      } catch (objErr) {
-        console.error('[CreateMemorial] Failed to generate preview URL:', objErr);
-        setError('Failed to load image preview');
-      }
-    };
-    reader.readAsDataURL(file);
-  }, [analyzeImage]);
+    // 1) Zero-wait preview: show the file immediately, before any processing
+    const objectUrl = URL.createObjectURL(file);
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = objectUrl;
+    setPreviewUrl(objectUrl);
+    setPhoto(file);
+    setError('');
+
+    // 2) Reset previous check results, then run the heavy work in the background
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
+    setCheckStatus('checking');
+    setIsAnalyzingImage(true);
+    processSelectedImage(file, runId);
+  }, [processSelectedImage]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -379,7 +461,6 @@ export default function CreateMemorial() {
         metadataTxId,
         petName,
         isPublic,
-        photoPreview,
         createdAt: Date.now(),
       };
       localStorage.setItem('draft_memorial', JSON.stringify(draftData));
@@ -758,22 +839,39 @@ export default function CreateMemorial() {
             {/* Photo drop zone */}
             <div>
               <label className={labelBase}>Pet Portrait</label>
-              {photoPreview ? (
+              {/* File input stays mounted regardless of preview state (mobile browsers dislike removing it mid-selection) */}
+              <input
+                id="photo-input"
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  handlePhotoSelect(e.target.files?.[0]);
+                  // allow re-selecting the same file later
+                  e.target.value = '';
+                }}
+              />
+              {previewUrl ? (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden">
-                    <img src={photoPreview} alt="Preview" className="w-full max-h-64 object-cover" />
+                    <img
+                      src={previewUrl}
+                      alt="Preview"
+                      className="w-full max-h-64 object-cover"
+                      onError={(e) => console.error('Image preview failed to load:', e)}
+                    />
                     <button
                       type="button"
                       onClick={() => {
                         analysisRunIdRef.current += 1;
                         setPhoto(null);
-                        setPhotoPreview('');
+                        revokePreviewUrl();
+                        setPreviewUrl('');
                         setIsAnalyzingImage(false);
+                        setCheckStatus('idle');
                         setDetectedPerson(false);
                         setDetectedAnimal(true);
                         setHumanConsentGiven(false);
-                        const fileInput = document.getElementById('photo-input');
-                        if (fileInput) fileInput.value = '';
                       }}
                       className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm text-[#1b1c1a] w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors"
                     >
@@ -781,12 +879,12 @@ export default function CreateMemorial() {
                     </button>
                   </div>
 
-                  {/* AI Analysis Indicator */}
+                  {/* Non-blocking image check status */}
                   {isAnalyzingImage && (
                     <div className="bg-[#fcf8f5] border border-[#d8c2ba]/40 rounded-xl p-3 flex items-center justify-between gap-2.5 text-xs text-[#8a4f36] animate-fadeIn">
                       <div className="flex items-center gap-2.5">
                         <span className="inline-block w-3.5 h-3.5 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                        <span className="font-medium">AI checking image background...</span>
+                        <span className="font-medium">Checking image… you can continue anytime</span>
                       </div>
                       <button
                         type="button"
@@ -794,6 +892,7 @@ export default function CreateMemorial() {
                           console.log('[AI Analysis] Manually skipped by user');
                           analysisRunIdRef.current += 1;
                           setIsAnalyzingImage(false);
+                          setCheckStatus('skipped');
                           setDetectedPerson(false);
                           setDetectedAnimal(true);
                         }}
@@ -803,8 +902,20 @@ export default function CreateMemorial() {
                       </button>
                     </div>
                   )}
+                  {!isAnalyzingImage && checkStatus === 'accepted' && (
+                    <div className="flex items-center gap-1.5 text-xs text-green-700 font-medium">
+                      <span className="material-symbols-outlined text-sm">check_circle</span>
+                      <span>Image accepted</span>
+                    </div>
+                  )}
+                  {!isAnalyzingImage && checkStatus === 'skipped' && (
+                    <div className="flex items-center gap-1.5 text-xs text-[#85736d] font-medium">
+                      <span className="material-symbols-outlined text-sm">info</span>
+                      <span>Check skipped</span>
+                    </div>
+                  )}
 
-                  {/* Human Detection Consent Checkbox */}
+                  {/* Human Detection Consent Checkbox (only when a person was actually detected) */}
                   {!isAnalyzingImage && detectedPerson && (
                     <div className="bg-[#fff8f6] border border-[#d8c2ba] rounded-xl p-4 flex items-start gap-3">
                       <input
@@ -822,7 +933,7 @@ export default function CreateMemorial() {
                   )}
 
                   {/* Animal Detection Info Notice */}
-                  {!isAnalyzingImage && !detectedAnimal && (
+                  {!isAnalyzingImage && checkStatus === 'accepted' && !detectedAnimal && (
                     <div className="bg-[#fffdfa] border border-[#e4d3c3] rounded-xl p-4 flex items-start gap-3 text-xs text-[#53433e]">
                       <span className="material-symbols-outlined text-[#d48c6f] text-base shrink-0 mt-0.5">info</span>
                       <p>
@@ -837,12 +948,11 @@ export default function CreateMemorial() {
                   onDrop={handleDrop}
                   onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-[#8a4f36]'); }}
                   onDragLeave={(e) => e.currentTarget.classList.remove('border-[#8a4f36]')}
-                  onClick={() => document.getElementById('photo-input').click()}
+                  onClick={() => document.getElementById('photo-input')?.click()}
                 >
                   <span className="material-symbols-outlined text-4xl text-[#d8c2ba] group-hover:text-[#8a4f36] transition-colors mb-2">add_photo_alternate</span>
                   <p className="text-sm text-[#53433e]">Drag a photo here, or <span className="text-[#8a4f36] underline">browse</span></p>
-                  <p className="text-xs text-[#85736d] mt-1">JPG or PNG · max 10 MB</p>
-                  <input id="photo-input" type="file" accept="image/*" className="hidden" onChange={(e) => handlePhotoSelect(e.target.files[0])} />
+                  <p className="text-xs text-[#85736d] mt-1">JPG or PNG · photos are auto-optimized</p>
                 </div>
               )}
             </div>
@@ -913,7 +1023,7 @@ export default function CreateMemorial() {
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
-              {photoPreview && <img src={photoPreview} alt="Preview" className="w-full max-h-48 object-cover rounded-xl" />}
+              {previewUrl && <img src={previewUrl} alt="Preview" className="w-full max-h-48 object-cover rounded-xl" />}
               <div className="space-y-2 text-sm text-[#53433e]">
                 <p><span className="font-semibold text-[#1b1c1a]">Name:</span> {petName || '—'}</p>
                 {species && <p><span className="font-semibold text-[#1b1c1a]">Species:</span> {species}{breed ? ` · ${breed}` : ''}</p>}
@@ -1011,11 +1121,7 @@ export default function CreateMemorial() {
                 onClick={() => {
                   if (step === 0) {
                     if (!petName.trim()) { setError('Pet name is required'); return; }
-                    if (isAnalyzingImage) {
-                      console.warn('[CreateMemorial] User clicked Continue, bypassing in-flight AI check.');
-                      analysisRunIdRef.current += 1;
-                      setIsAnalyzingImage(false);
-                    }
+                    // Image check/compression runs in the background and never gates Continue.
                     if (detectedPerson && !humanConsentGiven) {
                       setError('Please confirm consent for the detected person in the photo');
                       return;
