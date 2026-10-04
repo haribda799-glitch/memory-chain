@@ -23,111 +23,8 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
-const THUMBNAIL_MAX_DIMENSION = 600;          // px, max dimension for fast initial thumbnail
-const THUMBNAIL_QUALITY = 0.85;               // fast preview quality
 const AI_CHECK_COLD_TIMEOUT_MS = 12000;       // 12s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 4000;        // 4s timeout for warm start once models are cached
-
-/**
- * Direct hardware downsampling thumbnail generation preserving aspect ratio (max 600px, JPEG 0.85 Data URL).
- * Avoids allocating full-size 50MP raster in memory and handles missing file.type on mobile.
- */
-async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality = THUMBNAIL_QUALITY) {
-  if (!file) return null;
-  const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp)$/i.test(file.name || ''));
-  if (!isImage || file.type === 'image/gif') return null;
-
-  // 1. Get real image proportions via lightweight Image
-  let width = 0;
-  let height = 0;
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = objectUrl;
-    });
-    width = img.naturalWidth || img.width;
-    height = img.naturalHeight || img.height;
-  } catch {
-    console.warn('[CreateMemorial] Could not read dimensions via Image, fallback to direct bitmap');
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-
-  // Calculate proportional dimensions without distorting aspect ratio
-  let targetWidth = maxDim;
-  let targetHeight = maxDim;
-  if (width && height) {
-    const scale = Math.min(1, maxDim / Math.max(width, height));
-    targetWidth = Math.max(1, Math.round(width * scale));
-    targetHeight = Math.max(1, Math.round(height * scale));
-  }
-
-  // 2. Hardware downsampling with exact proportional dimensions
-  if (typeof createImageBitmap === 'function') {
-    try {
-      const bitmap = await createImageBitmap(file, {
-        resizeWidth: targetWidth,
-        resizeHeight: targetHeight,
-        resizeQuality: 'medium',
-      });
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close?.();
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        canvas.width = 0;
-        canvas.height = 0;
-        if (dataUrl && dataUrl.length > 50) return dataUrl;
-      }
-      bitmap.close?.();
-    } catch {
-      // Fallback to FileReader
-    }
-  }
-
-  // 3. Fallback via FileReader
-  try {
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = dataUrl;
-    });
-    const w = img.naturalWidth || targetWidth;
-    const h = img.naturalHeight || targetHeight;
-    const scale = Math.min(1, maxDim / Math.max(w, h));
-    const tw = Math.max(1, Math.round(w * scale));
-    const th = Math.max(1, Math.round(h * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = tw;
-    canvas.height = th;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, tw, th);
-    ctx.drawImage(img, 0, 0, tw, th);
-    img.src = '';
-    const thumb = canvas.toDataURL('image/jpeg', quality);
-    canvas.width = 0;
-    canvas.height = 0;
-    return thumb;
-  } catch (err) {
-    console.warn('[CreateMemorial] Thumbnail generation failed:', err);
-    return null;
-  }
-}
 
 /**
  * Downscale a photo via Canvas (max 1000px, JPEG 0.8) asynchronously so phone camera images
@@ -136,7 +33,9 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
  */
 async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX_IMAGE_DIMENSION, quality = COMPRESSION_QUALITY) {
   try {
-    if (!file || !file.type?.startsWith('image/') || file.type === 'image/gif') return file;
+    if (!file || file.type === 'image/gif') return file;
+    const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || ''));
+    if (!isImage) return file;
 
     let source = null;
     let width = 0;
@@ -225,15 +124,7 @@ let cachedObjectModelPromise = null;
 let isAiWarm = false;
 
 function resetAiModeration() {
-  import('@tensorflow/tfjs').then((tf) => {
-    try {
-      tf.disposeVariables();
-    } catch {
-      // ignore
-    }
-  }).catch(() => {});
-  // DO NOT wipe cachedFaceModelPromise or cachedObjectModelPromise here.
-  // Models are statically loaded once per session to prevent repeated ~20MB downloads.
+  // Do not call tf.disposeVariables() to avoid destroying BlazeFace / COCO-SSD model weights
 }
 
 async function getFaceModel() {
@@ -293,7 +184,6 @@ export default function CreateMemorial() {
   const [description, setDescription] = useState('');
   const [photo, setPhoto] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
-  const [previewFailed, setPreviewFailed] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
 
   // AI Verification State (informational only — never blocks the wizard)
@@ -320,7 +210,6 @@ export default function CreateMemorial() {
 
   // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
   const previewUrlRef = useRef('');
-  const thumbUrlRef = useRef('');
 
   // Immediate background warmup of AI models on component mount
   useEffect(() => {
@@ -343,11 +232,9 @@ export default function CreateMemorial() {
       URL.revokeObjectURL(previewUrlRef.current);
     }
     previewUrlRef.current = '';
-    thumbUrlRef.current = '';
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
-    setPreviewFailed(false);
     setError(null);
     setIsAnalyzingImage(false);
     setCheckStatus('idle');
@@ -412,9 +299,7 @@ export default function CreateMemorial() {
       URL.revokeObjectURL(previewUrlRef.current);
     }
     previewUrlRef.current = '';
-    thumbUrlRef.current = '';
     setPreviewUrl('');
-    setPreviewFailed(false);
     setIsPublic(false);
     setIsAnalyzingImage(false);
     setCheckStatus('idle');
@@ -459,9 +344,7 @@ export default function CreateMemorial() {
         URL.revokeObjectURL(previewUrlRef.current);
       }
       previewUrlRef.current = '';
-      thumbUrlRef.current = '';
       setPreviewUrl('');
-      setPreviewFailed(false);
       setIsAnalyzingImage(false);
       setCheckStatus('idle');
       setError(null);
@@ -548,21 +431,16 @@ export default function CreateMemorial() {
 
   /* Background AI verification pipeline: runs with dynamic timeout (cold: 12s, warm: 4s).
    * Fast preview is already on screen; nothing here blocks the UI. */
-  const processSelectedImage = useCallback(async (file, thumbDataUrl, runId) => {
+  const processSelectedImage = useCallback(async (file, imagePreviewUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     let tempUrl = null;
     try {
       if (!isCurrent()) return;
 
-      // Use fast thumbnail if available; otherwise use current objectUrl or create a temp one
-      let aiUrl = thumbDataUrl;
+      let aiUrl = imagePreviewUrl || previewUrlRef.current;
       if (!aiUrl) {
-        if (previewUrlRef.current) {
-          aiUrl = previewUrlRef.current;
-        } else {
-          tempUrl = URL.createObjectURL(file);
-          aiUrl = tempUrl;
-        }
+        tempUrl = URL.createObjectURL(file);
+        aiUrl = tempUrl;
       }
 
       const timeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
@@ -598,31 +476,17 @@ export default function CreateMemorial() {
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
 
-    const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || /\.(heic|heif)$/i.test(file.name || '');
-    if (isHeic) {
-      setError('HEIC format is not supported by your browser. Please select a JPG or PNG photo.');
-      setPhoto(file);
-      setPreviewUrl('');
-      setPreviewFailed(true);
-      return;
-    }
-
+    // Allow all image types, including HEIC/HEIF from iPhone:
     const looksLikeImage = Boolean(
       file.type?.startsWith('image/') ||
-      /\.(jpe?g|png|webp|bmp|gif)$/i.test(file.name || '')
+      /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '')
     );
     if (!looksLikeImage) {
-      setError('Please select a valid image file (JPG, PNG, or WebP)');
-      setPhoto(file);
-      setPreviewUrl('');
-      setPreviewFailed(true);
+      setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
-      setPhoto(file);
-      setPreviewUrl('');
-      setPreviewFailed(true);
       return;
     }
 
@@ -630,20 +494,16 @@ export default function CreateMemorial() {
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
 
-    // Reset error & states
+    // 1. Reset states
     setError(null);
     setPhoto(file);
-    setPreviewFailed(false);
-    thumbUrlRef.current = '';
 
     // Reset previous check results
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-    setCheckStatus('checking');
-    setIsAnalyzingImage(true);
 
-    // 1) Instant Zero-Wait Preview: synchronously create Object URL
+    // 2. Instant preview via reliable ObjectURL
     const objectUrl = URL.createObjectURL(file);
     if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrlRef.current);
@@ -651,27 +511,12 @@ export default function CreateMemorial() {
     previewUrlRef.current = objectUrl;
     setPreviewUrl(objectUrl);
 
-    // 2) Generate lightweight proportional thumbnail immediately with hardware downsampling
-    generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY)
-      .then((thumbDataUrl) => {
-        if (!isCurrent()) return;
+    // 3. Launch background AI check and background compression for Arweave
+    setCheckStatus('checking');
+    setIsAnalyzingImage(true);
+    processSelectedImage(file, objectUrl, runId);
 
-        if (thumbDataUrl) {
-          thumbUrlRef.current = thumbDataUrl;
-          // Upgrade to lightweight proportional DataURL (20-40 KB) guaranteed to render without memory crashes
-          setPreviewUrl(thumbDataUrl);
-        }
-
-        // Run AI verification on lightweight thumbnail or objectUrl
-        processSelectedImage(file, thumbDataUrl, runId);
-      })
-      .catch((thumbErr) => {
-        console.warn('[CreateMemorial] Thumbnail generation error:', thumbErr);
-        if (!isCurrent()) return;
-        processSelectedImage(file, null, runId);
-      });
-
-    // 3) Background safe compression for Arweave payload (never blocks preview or UI)
+    // Background safe compression for Arweave payload (never blocks preview or UI)
     resizeImage(file, 1000, 1000, COMPRESSION_QUALITY)
       .then((compressed) => {
         if (isCurrent() && compressed && compressed !== file) {
@@ -683,22 +528,9 @@ export default function CreateMemorial() {
       });
   }, [processSelectedImage]);
 
-  const handleImageError = useCallback(() => {
-    // If currently rendering ObjectURL and thumbnail DataURL is ready, switch to it
-    if (previewUrl && previewUrl.startsWith('blob:') && thumbUrlRef.current) {
-      console.warn('[CreateMemorial] ObjectURL decode warning, switching to Thumbnail DataURL');
-      setPreviewUrl(thumbUrlRef.current);
-      return;
-    }
-    // If currently rendering DataURL and ObjectURL exists, try ObjectURL
-    if (previewUrl && previewUrl.startsWith('data:') && previewUrlRef.current) {
-      console.warn('[CreateMemorial] Thumbnail DataURL warning, switching to ObjectURL');
-      setPreviewUrl(previewUrlRef.current);
-      return;
-    }
-    // Do NOT replace visual preview with placeholder card on a decode glitch
-    console.warn('[CreateMemorial] Image decode warning handled gracefully without hiding preview');
-  }, [previewUrl]);
+  const handleImageError = useCallback((e) => {
+    console.warn('[CreateMemorial] Image preview decode note:', e);
+  }, []);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -1140,49 +972,38 @@ export default function CreateMemorial() {
             {/* Photo drop zone */}
             <div>
               <label className={labelBase}>Pet Portrait</label>
-              {/* File input stays mounted regardless of preview state (mobile browsers dislike removing it mid-selection) */}
+              {/* File input accessible to iOS Safari and Android */}
               <input
                 ref={fileInputRef}
                 id="photo-input"
                 type="file"
-                accept="image/*"
-                className="hidden"
-                onClick={(e) => {
-                  e.target.value = '';
+                accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/*"
+                className="sr-only"
+                style={{
+                  position: 'absolute',
+                  width: '1px',
+                  height: '1px',
+                  padding: 0,
+                  margin: '-1px',
+                  overflow: 'hidden',
+                  clip: 'rect(0,0,0,0)',
+                  border: 0,
                 }}
                 onChange={(e) => {
-                  handlePhotoSelect(e.target.files?.[0]);
+                  const selectedFile = e.target.files?.[0];
+                  if (selectedFile) {
+                    handlePhotoSelect(selectedFile);
+                  }
+                  // Reset value so selecting the SAME file again triggers onChange
+                  e.target.value = '';
                 }}
               />
-              {previewFailed ? (
-                <div
-                  className="w-full h-56 rounded-2xl border border-dashed border-[#d8c2ba] bg-[#fbf9f6] flex flex-col items-center justify-center p-4 cursor-pointer hover:bg-[#f5efe6] transition-colors relative"
-                  onClick={() => {
-                    if (fileInputRef.current) fileInputRef.current.value = '';
-                    fileInputRef.current?.click();
-                  }}
-                >
-                  <span className="material-symbols-outlined text-4xl text-[#8a4f36] mb-1">image_not_supported</span>
-                  <p className="text-sm font-medium text-[#1b1c1a] truncate max-w-xs">{photo?.name || 'Unsupported file'}</p>
-                  <p className="text-xs text-[#85736d] mt-1">Tap to select a different photo (JPG, PNG, or WebP)</p>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveImage();
-                    }}
-                    className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
-                    title="Remove photo"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ) : previewUrl ? (
+              {previewUrl ? (
                 <div className="space-y-3">
-                  <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10">
+                  <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
                     <img
                       src={previewUrl}
-                      alt="Pet Portrait Preview"
+                      alt={photo?.name || 'Pet Portrait'}
                       className="w-full h-full object-cover"
                       onError={handleImageError}
                     />
@@ -1272,7 +1093,7 @@ export default function CreateMemorial() {
                 >
                   <span className="material-symbols-outlined text-4xl text-[#d8c2ba] group-hover:text-[#8a4f36] transition-colors mb-2">add_photo_alternate</span>
                   <p className="text-sm text-[#53433e]">Click or drag photo to upload</p>
-                  <p className="text-xs text-[#85736d] mt-1">JPG, PNG, WebP up to 30 MB (auto-optimized)</p>
+                  <p className="text-xs text-[#85736d] mt-1">JPG, PNG, WebP, or HEIC up to 30 MB (auto-optimized)</p>
                 </div>
               )}
             </div>
@@ -1344,20 +1165,12 @@ export default function CreateMemorial() {
             <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
               <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
               {previewUrl && (
-                <div className="relative w-full h-48 rounded-xl overflow-hidden border border-amber-900/10">
-                  {previewFailed ? (
-                    <div className="w-full h-full bg-[#fbf9f6] flex items-center justify-center gap-2 text-sm text-[#8a4f36]">
-                      <span className="material-symbols-outlined text-xl">image</span>
-                      <span>{photo?.name || 'Photo attached'}</span>
-                    </div>
-                  ) : (
-                    <img
-                      src={previewUrl}
-                      alt="Pet Portrait Preview"
-                      className="w-full h-full object-cover"
-                      onError={() => setPreviewFailed(true)}
-                    />
-                  )}
+                <div className="relative w-full h-48 rounded-xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
+                  <img
+                    src={previewUrl}
+                    alt={photo?.name || 'Pet Portrait'}
+                    className="w-full h-full object-cover"
+                  />
                 </div>
               )}
               <div className="space-y-2 text-sm text-[#53433e]">
