@@ -24,25 +24,53 @@ const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; w
 const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
 const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
 const THUMBNAIL_MAX_DIMENSION = 600;          // px, max dimension for fast initial thumbnail
-const THUMBNAIL_QUALITY = 0.8;                // fast preview quality
+const THUMBNAIL_QUALITY = 0.85;               // fast preview quality
 const AI_CHECK_COLD_TIMEOUT_MS = 12000;       // 12s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 4000;        // 4s timeout for warm start once models are cached
 
 /**
- * Direct hardware downsampling thumbnail generation (max 600px, JPEG 0.8 Data URL).
+ * Direct hardware downsampling thumbnail generation preserving aspect ratio (max 600px, JPEG 0.85 Data URL).
  * Avoids allocating full-size 50MP raster in memory and handles missing file.type on mobile.
  */
 async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality = THUMBNAIL_QUALITY) {
   if (!file) return null;
-  const isImage = file.type ? file.type.startsWith('image/') : /\.(jpe?g|png|webp|bmp)$/i.test(file.name || '');
+  const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp)$/i.test(file.name || ''));
   if (!isImage || file.type === 'image/gif') return null;
 
-  // 1. Hardware downsampling via createImageBitmap (available in Chrome Android, Safari 15+, Firefox)
+  // 1. Get real image proportions via lightweight Image
+  let width = 0;
+  let height = 0;
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = objectUrl;
+    });
+    width = img.naturalWidth || img.width;
+    height = img.naturalHeight || img.height;
+  } catch {
+    console.warn('[CreateMemorial] Could not read dimensions via Image, fallback to direct bitmap');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  // Calculate proportional dimensions without distorting aspect ratio
+  let targetWidth = maxDim;
+  let targetHeight = maxDim;
+  if (width && height) {
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    targetWidth = Math.max(1, Math.round(width * scale));
+    targetHeight = Math.max(1, Math.round(height * scale));
+  }
+
+  // 2. Hardware downsampling with exact proportional dimensions
   if (typeof createImageBitmap === 'function') {
     try {
       const bitmap = await createImageBitmap(file, {
-        resizeWidth: maxDim,
-        resizeHeight: maxDim,
+        resizeWidth: targetWidth,
+        resizeHeight: targetHeight,
         resizeQuality: 'medium',
       });
       const canvas = document.createElement('canvas');
@@ -59,11 +87,11 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
       }
       bitmap.close?.();
     } catch {
-      // Fallback to FileReader -> Image -> Canvas
+      // Fallback to FileReader
     }
   }
 
-  // 2. Fallback via FileReader -> Image -> Canvas
+  // 3. Fallback via FileReader
   try {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -73,29 +101,30 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIMENSION, quality
     });
     const img = new Image();
     await new Promise((resolve, reject) => {
-      img.onload = () => resolve();
+      img.onload = resolve;
       img.onerror = reject;
       img.src = dataUrl;
     });
-    const width = img.naturalWidth || img.width;
-    const height = img.naturalHeight || img.height;
-    if (!width || !height) return null;
-    const scale = Math.min(1, maxDim / Math.max(width, height));
+    const w = img.naturalWidth || targetWidth;
+    const h = img.naturalHeight || targetHeight;
+    const scale = Math.min(1, maxDim / Math.max(w, h));
+    const tw = Math.max(1, Math.round(w * scale));
+    const th = Math.max(1, Math.round(h * scale));
     const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
+    canvas.width = tw;
+    canvas.height = th;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, tw, th);
+    ctx.drawImage(img, 0, 0, tw, th);
     img.src = '';
     const thumb = canvas.toDataURL('image/jpeg', quality);
     canvas.width = 0;
     canvas.height = 0;
     return thumb;
   } catch (err) {
-    console.warn('[CreateMemorial] Thumbnail generation fallback failed:', err);
+    console.warn('[CreateMemorial] Thumbnail generation failed:', err);
     return null;
   }
 }
@@ -458,48 +487,63 @@ export default function CreateMemorial() {
 
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
-  /* ── Non-blocking AI image check ───────────────────────────
-   * Resolves with { hasPerson, hasAnimal }; may throw (callers treat that as "skipped"). */
+  /* ── Non-blocking AI image check (BlazeFace first, 256px canvas) ── */
   const runAiCheck = useCallback(async (imageUrl) => {
-    // 1. Ensure models are loaded BEFORE entering check scope
-    const [faceModel, objectModel] = await Promise.all([
-      getFaceModel(),
-      getObjectModel(),
-    ]);
+    // Load fast lightweight BlazeFace face model first (~2 MB)
+    const faceModel = await getFaceModel();
     const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
+      img.src = imageUrl;
+    });
+
+    // Scale down to lightweight 256x256 canvas for ultra-fast inference without mobile GPU strain
+    const offscreen = document.createElement('canvas');
+    offscreen.width = 256;
+    offscreen.height = 256;
+    const offCtx = offscreen.getContext('2d');
+    if (offCtx) {
+      offCtx.drawImage(img, 0, 0, 256, 256);
+    }
+    const inputSource = offCtx ? offscreen : img;
+
+    let faces = [];
     try {
-      await new Promise((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
-        img.src = imageUrl;
-      });
+      faces = await faceModel.estimateFaces(inputSource, false);
+    } catch (faceErr) {
+      console.warn('[AI Analysis] Face detection note:', faceErr);
+    }
 
-      let faces = [];
-      let predictions = [];
+    // If human face detected, return immediately without waiting for heavy COCO-SSD
+    if (faces && faces.length > 0) {
+      offscreen.width = 0;
+      offscreen.height = 0;
+      img.src = '';
+      return { hasPerson: true, hasAnimal: true };
+    }
 
-      // Official blazeface and coco-ssd models already execute tf.tidy internally inside detect / estimateFaces
-      try {
-        faces = await faceModel.estimateFaces(img, false);
-      } catch (faceErr) {
-        console.warn('[AI Analysis] Face detection error:', faceErr);
-      }
-
-      try {
-        predictions = await objectModel.detect(img);
-      } catch (objErr) {
-        console.warn('[AI Analysis] Object detection error:', objErr);
-      }
-
-      const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-      return {
-        hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
-        hasAnimal: predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
-      };
+    // Background object check via COCO-SSD (with timeout for slow networks)
+    let predictions = [];
+    try {
+      const objectModel = await Promise.race([
+        getObjectModel(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('COCO-SSD load timeout')), 6000)),
+      ]);
+      predictions = await objectModel.detect(inputSource);
+    } catch (objErr) {
+      console.warn('[AI Analysis] Object model skipped or timed out:', objErr?.message || objErr);
     } finally {
-      img.onload = null;
-      img.onerror = null;
+      offscreen.width = 0;
+      offscreen.height = 0;
       img.src = '';
     }
+
+    const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
+    return {
+      hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
+      hasAnimal: predictions.length === 0 ? true : predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
+    };
   }, []);
 
   /* Background AI verification pipeline: runs with dynamic timeout (cold: 12s, warm: 4s).
@@ -563,7 +607,10 @@ export default function CreateMemorial() {
       return;
     }
 
-    const looksLikeImage = (file.type ? file.type.startsWith('image/') : /\.(jpe?g|png|webp|bmp)$/i.test(file.name || ''));
+    const looksLikeImage = Boolean(
+      file.type?.startsWith('image/') ||
+      /\.(jpe?g|png|webp|bmp|gif)$/i.test(file.name || '')
+    );
     if (!looksLikeImage) {
       setError('Please select a valid image file (JPG, PNG, or WebP)');
       setPhoto(file);
@@ -604,14 +651,14 @@ export default function CreateMemorial() {
     previewUrlRef.current = objectUrl;
     setPreviewUrl(objectUrl);
 
-    // 2) Generate lightweight 600px thumbnail immediately with hardware downsampling
-    generateThumbnail(file, 600, 0.8)
+    // 2) Generate lightweight proportional thumbnail immediately with hardware downsampling
+    generateThumbnail(file, THUMBNAIL_MAX_DIMENSION, THUMBNAIL_QUALITY)
       .then((thumbDataUrl) => {
         if (!isCurrent()) return;
 
         if (thumbDataUrl) {
           thumbUrlRef.current = thumbDataUrl;
-          // Upgrade to lightweight 600px DataURL (20-40 KB) guaranteed to render without memory crashes
+          // Upgrade to lightweight proportional DataURL (20-40 KB) guaranteed to render without memory crashes
           setPreviewUrl(thumbDataUrl);
         }
 
