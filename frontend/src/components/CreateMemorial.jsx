@@ -51,7 +51,14 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
     try {
       const dataUrl = await new Promise((resolve, reject) => {
         const img = new Image();
+        const timer = setTimeout(() => {
+          img.onload = null;
+          img.onerror = null;
+          img.src = '';
+          reject(new Error('Image decode timeout'));
+        }, 4000);
         img.onload = () => {
+          clearTimeout(timer);
           try {
             const nw = img.naturalWidth || img.width;
             const nh = img.naturalHeight || img.height;
@@ -85,6 +92,7 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
           }
         };
         img.onerror = () => {
+          clearTimeout(timer);
           img.onload = null;
           img.onerror = null;
           img.src = '';
@@ -349,7 +357,9 @@ export default function CreateMemorial() {
   const [mintedIsPublic, setMintedIsPublic] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
-  const [photoInputKey, setPhotoInputKey] = useState(0);
+  // Photo processing progress state (instant visual feedback on file selection)
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
+  const [photoProgress, setPhotoProgress] = useState(0);
 
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
@@ -382,9 +392,10 @@ export default function CreateMemorial() {
     }
     previewUrlRef.current = '';
     if (fileInputRef.current) fileInputRef.current.value = '';
-    setPhotoInputKey((k) => k + 1);
     setPhoto(null);
     setPreviewUrl('');
+    setIsProcessingPhoto(false);
+    setPhotoProgress(0);
     setError(null);
     setCheckStatus('idle');
     setDetectedPerson(false);
@@ -442,13 +453,14 @@ export default function CreateMemorial() {
     setPassingYear('');
     setDescription('');
     if (fileInputRef.current) fileInputRef.current.value = '';
-    setPhotoInputKey((k) => k + 1);
     setPhoto(null);
     if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrlRef.current);
     }
     previewUrlRef.current = '';
     setPreviewUrl('');
+    setIsProcessingPhoto(false);
+    setPhotoProgress(0);
     setIsPublic(false);
     setCheckStatus('idle');
     setDetectedPerson(false);
@@ -487,13 +499,14 @@ export default function CreateMemorial() {
       setDraft(null);
       analysisRunIdRef.current += 1;
       if (fileInputRef.current) fileInputRef.current.value = '';
-      setPhotoInputKey((k) => k + 1);
       setPhoto(null);
       if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current);
       }
       previewUrlRef.current = '';
       setPreviewUrl('');
+      setIsProcessingPhoto(false);
+      setPhotoProgress(0);
       setCheckStatus('idle');
       setError(null);
       resetAiModeration();
@@ -554,9 +567,21 @@ export default function CreateMemorial() {
     }
 
     const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
+    const detectedAnimalList = predictions.filter((p) => animalClasses.includes(p.class) && p.score >= 0.25);
+    const hasAnimal = predictions.length === 0 ? true : detectedAnimalList.length > 0;
+
+    const hasCocoPerson = predictions.some((p) => p.class === 'person' && p.score >= 0.40);
+    // Real human faces in BlazeFace have confidence >= 0.90; animal muzzles (like dogs/cats) false-positive around 0.70-0.85
+    const highConfidenceFaces = (faces || []).filter((f) => {
+      const prob = Array.isArray(f.probability) ? f.probability[0] : (typeof f.probability === 'number' ? f.probability : 1);
+      return prob >= 0.90;
+    });
+
+    const hasPerson = Boolean(hasCocoPerson || highConfidenceFaces.length > 0);
+
     return {
-      hasPerson: (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35),
-      hasAnimal: predictions.length === 0 ? true : predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20),
+      hasPerson,
+      hasAnimal,
     };
   }, []);
 
@@ -623,6 +648,8 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     setError(null);
     setPhoto(file);
+    setIsProcessingPhoto(true);
+    setPhotoProgress(25);
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
@@ -631,11 +658,18 @@ export default function CreateMemorial() {
     // 1. Generate lightweight proportional Data URL preview immediately
     let thumbUrl = null;
     try {
+      setPhotoProgress(55);
       thumbUrl = await generateThumbnail(file);
+      setPhotoProgress(85);
     } catch (e) {
       console.warn('[CreateMemorial] Thumbnail error:', e);
     }
-    if (!isCurrent()) return;
+    if (!isCurrent()) {
+      setIsProcessingPhoto(false);
+      return;
+    }
+
+    setPhotoProgress(100);
 
     if (thumbUrl) {
       if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
@@ -643,6 +677,7 @@ export default function CreateMemorial() {
       }
       previewUrlRef.current = thumbUrl;
       setPreviewUrl(thumbUrl);
+      setIsProcessingPhoto(false);
     } else {
       // Safe fallback: only use ObjectURL for smaller files (< 3MB) to avoid mobile GPU texture crashes
       if (file.size <= 3 * 1024 * 1024) {
@@ -652,7 +687,9 @@ export default function CreateMemorial() {
         }
         previewUrlRef.current = objectUrl;
         setPreviewUrl(objectUrl);
+        setIsProcessingPhoto(false);
       } else {
+        setIsProcessingPhoto(false);
         setError('Could not process this image format. Please select another photo.');
         setCheckStatus('idle');
         return;
@@ -1128,7 +1165,6 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input accessible to iOS Safari and Android */}
               <input
-                key={photoInputKey}
                 ref={fileInputRef}
                 id="photo-input"
                 type="file"
@@ -1143,6 +1179,10 @@ export default function CreateMemorial() {
                   overflow: 'hidden',
                   clip: 'rect(0,0,0,0)',
                   border: 0,
+                }}
+                onClick={(e) => {
+                  // Reset value on click so re-selecting the same photo always triggers onChange
+                  e.currentTarget.value = '';
                 }}
                 onChange={(e) => {
                   const selectedFile = e.target.files?.[0];
@@ -1238,6 +1278,27 @@ export default function CreateMemorial() {
                       </p>
                     </div>
                   )}
+                </div>
+              ) : isProcessingPhoto ? (
+                <div className="w-full h-40 rounded-2xl border border-[#d8c2ba]/50 bg-[#fdfbf9] p-6 flex flex-col items-center justify-center space-y-3.5 animate-fadeIn">
+                  <div className="flex items-center gap-3">
+                    <span className="inline-block w-4 h-4 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm font-medium text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                      Preparing Pet Portrait…
+                    </span>
+                  </div>
+                  <div className="w-full max-w-xs space-y-1.5">
+                    <div className="w-full h-2 bg-[#ebdcd1]/50 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#8a4f36] rounded-full transition-all duration-300 ease-out"
+                        style={{ width: `${Math.max(10, photoProgress)}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[11px] text-[#85736d]">
+                      <span>{photoProgress < 50 ? 'Reading image…' : photoProgress < 90 ? 'Optimizing preview…' : 'Finalizing…'}</span>
+                      <span className="font-mono font-medium">{photoProgress}%</span>
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <label
