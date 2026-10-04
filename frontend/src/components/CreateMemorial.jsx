@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
@@ -18,6 +18,30 @@ const STEPS = ['Basic Info', 'Story', 'Preservation'];
 /* ── Minimal underline input ──────────────────────────────── */
 const inputBase = 'w-full bg-transparent border-b border-[#d8c2ba] focus:border-[#8a4f36] focus:ring-0 outline-none px-0 py-2 text-[18px] leading-7 text-[#1b1c1a] placeholder-[#85736d] transition-colors';
 const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase text-[#53433e] mb-2';
+
+/* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
+let cachedFaceModelPromise = null;
+let cachedObjectModelPromise = null;
+
+async function getFaceModel() {
+  if (!cachedFaceModelPromise) {
+    cachedFaceModelPromise = (async () => {
+      const blazeface = await import('@tensorflow-models/blazeface');
+      return blazeface.load();
+    })();
+  }
+  return cachedFaceModelPromise;
+}
+
+async function getObjectModel() {
+  if (!cachedObjectModelPromise) {
+    cachedObjectModelPromise = (async () => {
+      const cocoSsd = await import('@tensorflow-models/coco-ssd');
+      return cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    })();
+  }
+  return cachedObjectModelPromise;
+}
 
 export default function CreateMemorial() {
   const { ready, authenticated, user } = usePrivy();
@@ -59,9 +83,13 @@ export default function CreateMemorial() {
   const [flowStep, setFlowStep] = useState(0); // 0=idle,1=media,2=metadata,3=minting
   const [error, setError] = useState('');
   const [isMinting, setIsMinting] = useState(false);
+  const [isInitiating, setIsInitiating] = useState(false); // Immediate sync lock on click to prevent multi-mint
   const [txHash, setTxHash] = useState(null);
   const [mintedIsPublic, setMintedIsPublic] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+
+  // Tracking in-flight AI analysis runs to discard obsolete analysis results
+  const analysisRunIdRef = useRef(0);
 
   const { writeContractAsync } = useWriteContract();
   const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
@@ -92,6 +120,7 @@ export default function CreateMemorial() {
       setError('Transaction reverted on-chain. Please verify and try again.');
       setTxHash(null);
       setIsMinting(false);
+      setIsInitiating(false);
       setFlowStep(0);
     }
   }, [isReceiptError]);
@@ -99,8 +128,39 @@ export default function CreateMemorial() {
   // Draft recovery state
   const [draft, setDraft] = useState(null);
 
-  // Check for saved draft on mount
+  // Complete reset of form state
+  const resetFormState = useCallback(() => {
+    analysisRunIdRef.current += 1;
+    setStep(0);
+    setPetName('');
+    setSpecies('');
+    setBreed('');
+    setBirthDate('');
+    setMemorialDate('');
+    setBirthYear('');
+    setPassingYear('');
+    setDescription('');
+    setPhoto(null);
+    setPhotoPreview('');
+    setIsPublic(false);
+    setIsAnalyzingImage(false);
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
+    setFlowStep(0);
+    setError('');
+    setIsMinting(false);
+    setIsInitiating(false);
+    setTxHash(null);
+    setMintedIsPublic(false);
+    setShowShareModal(false);
+    const fileInput = document.getElementById('photo-input');
+    if (fileInput) fileInput.value = '';
+  }, []);
+
+  // Initialize clean state and check for saved draft on mount
   useEffect(() => {
+    resetFormState();
     try {
       const saved = localStorage.getItem('draft_memorial');
       if (saved) {
@@ -112,13 +172,18 @@ export default function CreateMemorial() {
     } catch (err) {
       console.warn('[Draft] Error loading draft:', err);
     }
-  }, []);
+  }, [resetFormState]);
 
-  // Clear draft on successful transaction confirmation
+  // Clear draft & photo states on successful transaction confirmation
   useEffect(() => {
     if (isSuccess) {
       localStorage.removeItem('draft_memorial');
       setDraft(null);
+      analysisRunIdRef.current += 1;
+      setPhoto(null);
+      setPhotoPreview('');
+      setIsAnalyzingImage(false);
+      setError('');
     }
   }, [isSuccess]);
 
@@ -140,67 +205,117 @@ export default function CreateMemorial() {
 
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
 
-  /* ── AI Image Analysis ─────────────────────────────────── */
-  const analyzeImage = async (imageFile) => {
+  /* ── AI Image Analysis with 7s timeout & fallback ──────── */
+  const analyzeImage = useCallback(async (imageSrc, runId) => {
+    setIsAnalyzingImage(true);
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
+
+    let isDone = false;
+    const timer = setTimeout(() => {
+      if (!isDone && runId === analysisRunIdRef.current) {
+        console.warn('[AI Analysis] Analysis timed out (7s limit), bypassing check.');
+        setIsAnalyzingImage(false);
+        setDetectedPerson(false);
+        setDetectedAnimal(true);
+      }
+    }, 7000);
+
     try {
-      setIsAnalyzingImage(true);
-      setDetectedPerson(false);
-      setDetectedAnimal(true);
-      setHumanConsentGiven(false);
-
-      // Dynamic import to optimize bundle size
       await import('@tensorflow/tfjs');
-      const cocoSsd = await import('@tensorflow-models/coco-ssd');
-      const blazeface = await import('@tensorflow-models/blazeface');
+      if (runId !== analysisRunIdRef.current) return;
 
-      // Create HTMLImageElement to pass to models
       const img = new Image();
-      img.src = URL.createObjectURL(imageFile);
-      await new Promise((resolve) => { img.onload = resolve; });
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
+        img.src = imageSrc;
+      });
 
-      // Run face detector (BlazeFace) + COCO-SSD in parallel
+      if (runId !== analysisRunIdRef.current) return;
+
       let faces = [];
       let predictions = [];
 
       try {
-        const faceModel = await blazeface.load();
-        faces = await faceModel.estimateFaces(img, false);
+        const faceModel = await getFaceModel();
+        if (runId === analysisRunIdRef.current) {
+          faces = await faceModel.estimateFaces(img, false);
+        }
       } catch (faceErr) {
+        cachedFaceModelPromise = null;
         console.warn('[AI Analysis] Face detection warning:', faceErr);
       }
 
+      if (runId !== analysisRunIdRef.current) return;
+
       try {
-        const objectModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-        predictions = await objectModel.detect(img);
+        const objectModel = await getObjectModel();
+        if (runId === analysisRunIdRef.current) {
+          predictions = await objectModel.detect(img);
+        }
       } catch (objErr) {
+        cachedObjectModelPromise = null;
         console.warn('[AI Analysis] Object detection warning:', objErr);
       }
 
+      if (runId !== analysisRunIdRef.current) return;
+
       const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-      const hasPerson = (faces && faces.length > 0) || predictions.some(p => p.class === 'person' && p.score > 0.35);
-      const hasAnimal = predictions.some(p => animalClasses.includes(p.class) && p.score > 0.20);
+      const hasPerson = (faces && faces.length > 0) || predictions.some((p) => p.class === 'person' && p.score > 0.35);
+      const hasAnimal = predictions.some((p) => animalClasses.includes(p.class) && p.score > 0.20);
 
       setDetectedPerson(hasPerson);
       setDetectedAnimal(hasAnimal);
     } catch (err) {
-      console.error('[AI Analysis] Error:', err);
-      // On ML error do not block user — set default values
-      setDetectedPerson(false);
-      setDetectedAnimal(true);
+      console.warn('[AI Analysis] ML error or abort, bypassing check:', err?.message || err);
+      if (runId === analysisRunIdRef.current) {
+        setDetectedPerson(false);
+        setDetectedAnimal(true);
+      }
     } finally {
-      setIsAnalyzingImage(false);
+      isDone = true;
+      clearTimeout(timer);
+      if (runId === analysisRunIdRef.current) {
+        setIsAnalyzingImage(false);
+      }
     }
-  };
+  }, []);
 
-  /* ── Photo handlers ────────────────────────────────────── */
+  /* ── Photo handlers with reliable FileReader ──────────── */
   const handlePhotoSelect = useCallback((file) => {
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) { setError('Photo must be under 10 MB'); return; }
-    setPhoto(file);
-    setPhotoPreview(URL.createObjectURL(file));
+
     setError('');
-    analyzeImage(file);
-  }, []);
+    setPhoto(file);
+
+    analysisRunIdRef.current += 1;
+    const runId = analysisRunIdRef.current;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result;
+      if (typeof dataUrl === 'string') {
+        setPhotoPreview(dataUrl);
+        analyzeImage(dataUrl, runId);
+      }
+    };
+    reader.onerror = (readErr) => {
+      console.warn('[CreateMemorial] FileReader error, using createObjectURL fallback:', readErr);
+      try {
+        const objectUrl = URL.createObjectURL(file);
+        setPhotoPreview(objectUrl);
+        analyzeImage(objectUrl, runId);
+      } catch (objErr) {
+        console.error('[CreateMemorial] Failed to generate preview URL:', objErr);
+        setError('Failed to load image preview');
+      }
+    };
+    reader.readAsDataURL(file);
+  }, [analyzeImage]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -211,23 +326,30 @@ export default function CreateMemorial() {
 
   /* ── Submit flow: Arweave upload → mint ──────────────── */
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!isConnected) { setError('Please connect your wallet first'); return; }
+    if (e) e.preventDefault();
+    if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
+    setIsInitiating(true);
+
+    if (!isConnected) { setIsInitiating(false); setError('Please connect your wallet first'); return; }
     if (!connector) {
+      setIsInitiating(false);
       console.error("Wallet connector is missing or Privy was blocked.");
       setError("Wallet connection failed. Please disable your adblocker or reconnect your wallet.");
       return;
     }
-    if (!petName.trim()) { setError('Pet name is required'); return; }
+    if (!petName.trim()) { setIsInitiating(false); setError('Pet name is required'); return; }
     if (detectedPerson && !humanConsentGiven) {
+      setIsInitiating(false);
       setError('Please confirm consent for the person detected in the photo');
       return;
     }
     if (isCreationPaused) {
+      setIsInitiating(false);
       setError('Memorial creation is temporarily paused by the protocol. Please try again later.');
       return;
     }
     if (isInsufficientFunds) {
+      setIsInitiating(false);
       setError('Insufficient ETH Balance to mint memorial.');
       return;
     }
@@ -235,6 +357,7 @@ export default function CreateMemorial() {
       try {
         await switchChainAsync({ chainId: baseSepolia.id });
       } catch (switchErr) {
+        setIsInitiating(false);
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
         setError('Please switch your wallet network to Base Sepolia to continue.');
         return;
@@ -292,6 +415,8 @@ export default function CreateMemorial() {
       localStorage.removeItem('draft_memorial');
       setDraft(null);
       setTxHash(hash);
+      setIsMinting(false);
+      setIsInitiating(false);
     } catch (err) {
       console.error('[CreateMemorial] Minting error:', err);
       let errMsg = err.shortMessage || err.message || 'Something went wrong';
@@ -302,6 +427,7 @@ export default function CreateMemorial() {
       setError(`Minting failed: ${errMsg}`);
       alert(`Minting failed: ${errMsg}`);
       setIsMinting(false);
+      setIsInitiating(false);
       setFlowStep(0);
     }
   };
@@ -309,17 +435,22 @@ export default function CreateMemorial() {
   /* ── Resume draft flow ─────────────────────────────────── */
   const handleResumeDraft = async (targetDraft = draft) => {
     if (!targetDraft || !targetDraft.metadataTxId) return;
-    if (isSubmitting) return; // Prevent double mint click
-    if (!isConnected) { setError('Please connect your wallet first'); return; }
+    if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
+    setIsInitiating(true);
+
+    if (!isConnected) { setIsInitiating(false); setError('Please connect your wallet first'); return; }
     if (!connector) {
+      setIsInitiating(false);
       setError("Wallet connection failed. Please disable your adblocker or reconnect your wallet.");
       return;
     }
     if (isCreationPaused) {
+      setIsInitiating(false);
       setError('Memorial creation is temporarily paused by the protocol. Please try again later.');
       return;
     }
     if (isInsufficientFunds) {
+      setIsInitiating(false);
       setError('Insufficient ETH Balance to mint memorial.');
       return;
     }
@@ -327,6 +458,7 @@ export default function CreateMemorial() {
       try {
         await switchChainAsync({ chainId: baseSepolia.id });
       } catch (switchErr) {
+        setIsInitiating(false);
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
         setError('Please switch your wallet network to Base Sepolia to continue.');
         return;
@@ -367,6 +499,8 @@ export default function CreateMemorial() {
       localStorage.removeItem('draft_memorial');
       setDraft(null);
       setTxHash(hash);
+      setIsMinting(false);
+      setIsInitiating(false);
     } catch (err) {
       console.error('[CreateMemorial] Resume minting error:', err);
       let errMsg = err.shortMessage || err.message || 'Something went wrong';
@@ -376,6 +510,7 @@ export default function CreateMemorial() {
       }
       setError(`Minting failed: ${errMsg}`);
       setIsMinting(false);
+      setIsInitiating(false);
       setFlowStep(0);
     }
   };
@@ -387,7 +522,7 @@ export default function CreateMemorial() {
 
   const isEOA = connector?.name && !connector.name.toLowerCase().includes('privy');
 
-  const isSubmitting = flowStep > 0 || isMinting || isConfirming || (Boolean(txHash) && !isSuccess);
+  const isSubmitting = isInitiating || flowStep > 0 || isMinting || isConfirming || (Boolean(txHash) && !isSuccess);
 
   /* ── Success screen ────────────────────────────────────── */
   if (isSuccess) {
@@ -474,6 +609,16 @@ export default function CreateMemorial() {
                 </button>
               </>
             )}
+          </div>
+
+          <div className="pt-2 border-t border-[#e0d0c7]/50">
+            <button
+              type="button"
+              onClick={resetFormState}
+              className="text-xs text-[#85736d] hover:text-[#8a4f36] font-semibold uppercase tracking-wider transition-colors cursor-pointer"
+            >
+              + Create Another Memorial
+            </button>
           </div>
         </div>
 
@@ -620,11 +765,15 @@ export default function CreateMemorial() {
                     <button
                       type="button"
                       onClick={() => {
+                        analysisRunIdRef.current += 1;
                         setPhoto(null);
                         setPhotoPreview('');
+                        setIsAnalyzingImage(false);
                         setDetectedPerson(false);
                         setDetectedAnimal(true);
                         setHumanConsentGiven(false);
+                        const fileInput = document.getElementById('photo-input');
+                        if (fileInput) fileInput.value = '';
                       }}
                       className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm text-[#1b1c1a] w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors"
                     >
@@ -634,9 +783,24 @@ export default function CreateMemorial() {
 
                   {/* AI Analysis Indicator */}
                   {isAnalyzingImage && (
-                    <div className="bg-[#fcf8f5] border border-[#d8c2ba]/40 rounded-xl p-3 flex items-center gap-2.5 text-xs text-[#8a4f36]">
-                      <span className="inline-block w-3.5 h-3.5 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                      <span className="font-medium">AI checking image background...</span>
+                    <div className="bg-[#fcf8f5] border border-[#d8c2ba]/40 rounded-xl p-3 flex items-center justify-between gap-2.5 text-xs text-[#8a4f36] animate-fadeIn">
+                      <div className="flex items-center gap-2.5">
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+                        <span className="font-medium">AI checking image background...</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          console.log('[AI Analysis] Manually skipped by user');
+                          analysisRunIdRef.current += 1;
+                          setIsAnalyzingImage(false);
+                          setDetectedPerson(false);
+                          setDetectedAnimal(true);
+                        }}
+                        className="text-xs text-[#8a4f36] hover:text-[#53433e] underline font-semibold cursor-pointer shrink-0"
+                      >
+                        Skip Check
+                      </button>
                     </div>
                   )}
 
@@ -847,7 +1011,11 @@ export default function CreateMemorial() {
                 onClick={() => {
                   if (step === 0) {
                     if (!petName.trim()) { setError('Pet name is required'); return; }
-                    if (isAnalyzingImage) { setError('AI image analysis in progress...'); return; }
+                    if (isAnalyzingImage) {
+                      console.warn('[CreateMemorial] User clicked Continue, bypassing in-flight AI check.');
+                      analysisRunIdRef.current += 1;
+                      setIsAnalyzingImage(false);
+                    }
                     if (detectedPerson && !humanConsentGiven) {
                       setError('Please confirm consent for the detected person in the photo');
                       return;
@@ -856,13 +1024,57 @@ export default function CreateMemorial() {
                   setError('');
                   setStep(s => s + 1);
                 }}
-                disabled={isAnalyzingImage || (step === 0 && detectedPerson && !humanConsentGiven)}
-                className="flex items-center gap-2 bg-[#d48c6f] text-white px-8 py-3 rounded-2xl text-xs font-semibold tracking-widest uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={step === 0 && detectedPerson && !humanConsentGiven}
+                className="flex items-center gap-2 bg-[#d48c6f] text-white px-8 py-3 rounded-2xl text-xs font-semibold tracking-widest uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 <span>Continue</span>
                 <span className="material-symbols-outlined text-base">arrow_forward</span>
               </button>
             )}
+          </div>
+        )}
+
+        {/* Full-screen blocking modal while transaction is submitted to Base Sepolia and waiting for confirmation */}
+        {Boolean(txHash) && !isSuccess && (
+          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+            <div className="max-w-md w-full bg-[#fbf9f6] border border-[#d8c2ba] rounded-3xl p-6 md:p-8 text-center space-y-5 shadow-2xl">
+              <div className="w-16 h-16 rounded-full bg-[#ebddd5] flex items-center justify-center mx-auto shadow-inner text-[#8a4f36]">
+                <span className="inline-block w-8 h-8 border-3 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-2xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                  Transaction Submitted
+                </h3>
+                <p className="text-sm text-[#53433e] leading-relaxed font-medium">
+                  Transaction submitted to Base Sepolia. Waiting for confirmation...
+                </p>
+              </div>
+
+              {/* BaseScan Explorer Link */}
+              <div className="bg-white rounded-2xl border border-[#d8c2ba]/40 p-4 space-y-2 text-left shadow-xs">
+                <div className="flex items-center justify-between text-xs text-[#85736d]">
+                  <span className="font-semibold uppercase tracking-wider">Explorer</span>
+                  <span className="inline-flex items-center gap-1.5 text-amber-700 font-medium bg-amber-50 border border-amber-200/60 px-2.5 py-0.5 rounded-full">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+                    Confirming Block
+                  </span>
+                </div>
+                <a
+                  href={`https://sepolia.basescan.org/tx/${txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-mono text-[#8a4f36] hover:underline break-all group"
+                >
+                  <span>{txHash}</span>
+                  <span className="material-symbols-outlined text-sm group-hover:translate-x-0.5 transition-transform shrink-0">open_in_new</span>
+                </a>
+              </div>
+
+              <p className="text-xs text-[#85736d] leading-relaxed">
+                Please do not close or refresh this tab while your memorial is being written into the blockchain ledger.
+              </p>
+            </div>
           </div>
         )}
       </div>
