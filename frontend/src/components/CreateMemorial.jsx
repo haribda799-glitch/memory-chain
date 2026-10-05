@@ -149,7 +149,7 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
     }
   }
 
-  // Approach 3: Universal FileReader Data URL fallback
+  // Approach 3: Universal FileReader Data URL fallback (verified decodable)
   try {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -158,7 +158,33 @@ async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THU
       reader.readAsDataURL(file);
     });
     if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
-      return dataUrl;
+      const isDecodable = await new Promise((resolve) => {
+        const testImg = new Image();
+        const testTimer = setTimeout(() => {
+          testImg.onload = null;
+          testImg.onerror = null;
+          testImg.src = '';
+          resolve(false);
+        }, 3000);
+        testImg.onload = () => {
+          clearTimeout(testTimer);
+          testImg.onload = null;
+          testImg.onerror = null;
+          testImg.src = '';
+          resolve(true);
+        };
+        testImg.onerror = () => {
+          clearTimeout(testTimer);
+          testImg.onload = null;
+          testImg.onerror = null;
+          testImg.src = '';
+          resolve(false);
+        };
+        testImg.src = dataUrl;
+      });
+      if (isDecodable) {
+        return dataUrl;
+      }
     }
   } catch (readerErr) {
     console.warn('[CreateMemorial] Thumbnail Approach 3 (FileReader) note:', readerErr?.message || readerErr);
@@ -370,10 +396,22 @@ export default function CreateMemorial() {
   // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
   const previewUrlRef = useRef('');
 
+  // Track mount timestamp to silence spurious browser auto-restore errors on page reload
+  const mountTimeRef = useRef(Date.now());
+
   // Immediate background warmup of AI models on component mount
   useEffect(() => {
     preloadAiModels();
   }, []);
+
+  // Ensure file input has no stale browser-restored value on mount / reconnection
+  useEffect(() => {
+    if (fileInputRef.current && !photo) {
+      try {
+        fileInputRef.current.value = '';
+      } catch {}
+    }
+  }, [isConnected, photo]);
 
   useEffect(() => {
     return () => {
@@ -637,23 +675,22 @@ export default function CreateMemorial() {
     );
     if (!looksLikeImage) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
     setError(null);
-    setPhoto(file);
+
+    // Provide immediate visual feedback while generating the proportional preview
     setIsProcessingPhoto(true);
     setPhotoProgress(25);
-    setDetectedPerson(false);
-    setDetectedAnimal(true);
-    setHumanConsentGiven(false);
-    setCheckStatus('checking');
 
     // 1. Generate lightweight proportional Data URL preview immediately
     let thumbUrl = null;
@@ -669,35 +706,43 @@ export default function CreateMemorial() {
       return;
     }
 
-    setPhotoProgress(100);
-
-    if (thumbUrl) {
+    // Guard: If thumbnail generation failed, the file is unreadable, invalid, or was invalidated across page reload
+    if (!thumbUrl) {
+      console.warn('[CreateMemorial] File could not be decoded as an image. Cleaning up photo state.');
+      setIsProcessingPhoto(false);
+      setPhotoProgress(0);
+      setPhoto(null);
+      setPreviewUrl('');
       if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current);
       }
-      previewUrlRef.current = thumbUrl;
-      setPreviewUrl(thumbUrl);
-      setIsProcessingPhoto(false);
-    } else {
-      // Safe fallback: only use ObjectURL for smaller files (< 3MB) to avoid mobile GPU texture crashes
-      if (file.size <= 3 * 1024 * 1024) {
-        const objectUrl = URL.createObjectURL(file);
-        if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-          URL.revokeObjectURL(previewUrlRef.current);
-        }
-        previewUrlRef.current = objectUrl;
-        setPreviewUrl(objectUrl);
-        setIsProcessingPhoto(false);
-      } else {
-        setIsProcessingPhoto(false);
-        setError('Could not process this image format. Please select another photo.');
-        setCheckStatus('idle');
-        return;
+      previewUrlRef.current = '';
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setCheckStatus('idle');
+      // Only show error if the user interactively chose this file, not during automatic browser form restoration
+      if (Date.now() - mountTimeRef.current > 2500) {
+        setError('Unable to read this photo format. Please select another photo.');
       }
+      return;
     }
 
+    setPhotoProgress(100);
+
+    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+    previewUrlRef.current = thumbUrl;
+    setPhoto(file);
+    setPreviewUrl(thumbUrl);
+    setIsProcessingPhoto(false);
+
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
+    setCheckStatus('checking');
+
     // 2. Run non-blocking AI verification in background (does NOT block preview or UI)
-    processSelectedImage(file, thumbUrl || previewUrlRef.current, runId);
+    processSelectedImage(file, thumbUrl, runId);
   }, [processSelectedImage]);
 
   const handleImageError = useCallback(async (e) => {
@@ -708,12 +753,16 @@ export default function CreateMemorial() {
         if (recoveryUrl && recoveryUrl !== previewUrlRef.current) {
           previewUrlRef.current = recoveryUrl;
           setPreviewUrl(recoveryUrl);
+          return;
         }
       } catch (recErr) {
         console.warn('[CreateMemorial] Image preview recovery failed:', recErr);
       }
+      // If recovery failed, cleanly remove the preview to prevent displaying a broken <img> or alt-text
+      handleRemoveImage();
+      setError('Photo preview could not be displayed. Please select a photo again.');
     }
-  }, [photo]);
+  }, [photo, handleRemoveImage]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -1039,11 +1088,23 @@ export default function CreateMemorial() {
     );
   }
 
-  /* ── Not connected ─────────────────────────────────────── */
-  if (!isConnected) {
+  /* ── Privy initializing / hydrating session ──────────────── */
+  if (!ready) {
     return (
       <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
-        <div className="max-w-sm text-center space-y-5">
+        <div className="max-w-sm text-center space-y-4 animate-fadeIn">
+          <span className="inline-block w-8 h-8 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+          <p className="text-[#85736d] text-sm font-medium">Connecting to Sanctuary…</p>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Not connected ─────────────────────────────────────── */
+  if (!authenticated) {
+    return (
+      <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
+        <div className="max-w-sm text-center space-y-5 animate-fadeIn">
           <span className="material-symbols-outlined text-5xl text-[#d8c2ba]">account_balance_wallet</span>
           <h2 className="text-2xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Connect Your Wallet</h2>
           <p className="text-[#53433e] text-sm">Please connect your wallet to create a memorial.</p>
@@ -1165,9 +1226,18 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input accessible to iOS Safari and Android */}
               <input
-                ref={fileInputRef}
+                ref={(el) => {
+                  fileInputRef.current = el;
+                  if (el && !photo && el.value) {
+                    try {
+                      el.value = '';
+                    } catch {}
+                  }
+                }}
                 id="photo-input"
                 type="file"
+                autoComplete="off"
+                tabIndex={-1}
                 accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/*"
                 className="sr-only"
                 style={{
