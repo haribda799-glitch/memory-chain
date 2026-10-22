@@ -240,10 +240,10 @@ export default function MemorialPage() {
 
   if (isLoading) {
     return (
-      <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] animate-pulse">
-        <div className="max-w-2xl mx-auto px-6 md:px-0 space-y-6">
-          <div className="w-48 h-48 rounded-full bg-[#efeeeb] mx-auto" />
-          <div className="h-10 bg-[#efeeeb] rounded w-1/2 mx-auto" />
+      <div className="pt-20 sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6] animate-pulse">
+        <div className="max-w-2xl mx-auto px-6 md:px-0 space-y-4 md:space-y-6">
+          <div className="w-32 h-32 sm:w-36 sm:h-36 md:w-48 md:h-48 lg:w-64 lg:h-64 rounded-full bg-[#efeeeb] mx-auto" />
+          <div className="h-8 md:h-10 bg-[#efeeeb] rounded w-1/2 mx-auto" />
           <div className="h-4 bg-[#efeeeb] rounded w-1/3 mx-auto" />
         </div>
       </div>
@@ -302,16 +302,16 @@ export default function MemorialPage() {
     : (createdAt ? formatDate(Number(createdAt)) : 'Date unknown');
 
   const avatarGlowClass = isBurning
-    ? 'border-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.35)] animate-[avatarCandleGlow_4s_ease-in-out_infinite]'
-    : 'border-surface shadow-[0_8px_30px_rgb(0,0,0,0.12)]';
+    ? 'border-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-shadow duration-700 animate-[avatarCandleGlow_4s_ease-in-out_infinite]'
+    : 'border-surface shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-shadow duration-700';
 
   return (
     <div className="pt-20 sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6]">
-      <main className="flex-grow flex flex-col items-center px-4 w-full max-w-7xl mx-auto">
+      <main className="flex-grow flex flex-col items-center gap-3 sm:gap-4 md:gap-6 px-4 w-full max-w-7xl mx-auto">
 
         {/* Council Ban Banner */}
         {parsedMemorial?.isBanned && (
-          <div className="order-0 md:order-0 w-full max-w-2xl bg-red-50 border border-red-300 rounded-xl md:rounded-2xl p-3 md:p-4 mb-3 md:mb-6 text-center text-red-800 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-sm">
+          <div className="order-0 md:order-0 w-full max-w-2xl bg-red-50 border border-red-300 rounded-xl md:rounded-2xl p-2.5 md:p-4 text-center text-red-800 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-sm">
             <span className="material-symbols-outlined text-red-600 text-base">block</span>
             This memorial has been suspended by Council moderation.
           </div>
@@ -319,7 +319,7 @@ export default function MemorialPage() {
 
         {/* Under Review Banner */}
         {isFlagged && (
-          <div className="order-0 md:order-0 w-full max-w-2xl bg-amber-50 border border-amber-300 rounded-xl md:rounded-2xl p-3 md:p-4 mb-3 md:mb-6 text-center text-amber-800 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-sm">
+          <div className="order-0 md:order-0 w-full max-w-2xl bg-amber-50 border border-amber-300 rounded-xl md:rounded-2xl p-2.5 md:p-4 text-center text-amber-800 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-sm">
             <span className="material-symbols-outlined text-amber-600 text-base">warning</span>
             This memorial has been reported and is currently under community moderation review.
           </div>
@@ -327,15 +327,15 @@ export default function MemorialPage() {
 
         {/* Private / Unlisted Banner */}
         {parsedMemorial?.isPublic === false && (
-          <div className="order-0 md:order-0 w-full max-w-2xl bg-stone-100/90 border border-stone-300 rounded-xl md:rounded-2xl p-2.5 md:p-3.5 mb-3 md:mb-6 text-center text-stone-700 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+          <div className="order-0 md:order-0 w-full max-w-2xl bg-stone-100/90 border border-stone-300 rounded-xl md:rounded-2xl p-2 md:p-3.5 text-center text-stone-700 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
             <span className="material-symbols-outlined text-stone-600 text-base">lock</span>
             <span>Private / Unlisted Memorial (Hidden from public gallery)</span>
           </div>
         )}
 
         {/* Portrait & Header (Mobile: order-1, Desktop: order-1) */}
-        <div className="order-1 md:order-1 flex flex-col items-center text-center space-y-2.5 sm:space-y-3 md:space-y-6 w-full max-w-2xl mx-auto mb-3 sm:mb-4 md:mb-8">
-          <div className={`relative w-32 h-32 sm:w-36 sm:h-36 md:w-64 md:h-64 lg:w-72 lg:h-72 rounded-full overflow-hidden border-[3px] md:border-4 mx-auto transition-all duration-700 ${avatarGlowClass}`}>
+        <div className="order-1 md:order-1 flex flex-col items-center text-center gap-2 sm:gap-3 md:gap-5 w-full max-w-2xl mx-auto mb-1 md:mb-4">
+          <div className={`relative w-32 h-32 sm:w-36 sm:h-36 md:w-48 md:h-48 lg:w-64 lg:h-64 rounded-full overflow-hidden border-[3px] md:border-4 mx-auto transition-all duration-700 ${avatarGlowClass}`}>
             <img 
               alt={petName ? `Memorial for ${petName}` : 'Pet portrait'} 
               className="w-full h-full object-cover" 
@@ -344,13 +344,13 @@ export default function MemorialPage() {
             />
           </div>
           <div className="space-y-1 md:space-y-2">
-            <h1 className="font-display-lg-mobile md:font-display-lg text-2xl sm:text-3xl md:text-display-lg text-[#2C2520] tracking-tight">
+            <h1 className="font-display-lg-mobile md:font-display-lg text-2xl sm:text-3xl md:text-display-lg text-[#2C2520] tracking-tight leading-tight">
               {petName}
             </h1>
             <p className="font-label-md text-[11px] md:text-label-md text-[#5A5047] uppercase tracking-wider">
               {dateDisplay}
             </p>
-            <div className="flex flex-wrap justify-center items-center gap-1.5 md:gap-2 pt-1 md:pt-3">
+            <div className="flex flex-wrap justify-center items-center gap-1.5 md:gap-2 pt-0.5 md:pt-2">
               {speciesVal ? (
                 <span className="px-3 py-0.5 md:px-4 md:py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-bold text-[10px] md:text-[11px] uppercase tracking-wider">
                   {speciesVal}
@@ -370,10 +370,10 @@ export default function MemorialPage() {
         </div>
 
         {/* ── Sacred Flame Alcove & Collective Altar (Mobile: order-2, Desktop: order-3) ──────────── */}
-        <div className="order-2 md:order-3 w-full max-w-md mx-auto mb-5 sm:mb-6 md:mb-16 flex flex-col items-center">
+        <div className="order-2 md:order-3 w-full max-w-md mx-auto mb-2 sm:mb-3 md:mb-10 flex flex-col items-center">
           {isBurning ? (
             <div
-              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-4 sm:px-5 sm:py-5 md:px-6 md:py-6 flex flex-col items-center animate-[alcoveBreath_5s_ease-in-out_infinite]"
+              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-3.5 sm:px-5 sm:py-4 md:px-6 md:py-6 flex flex-col items-center animate-[alcoveBreath_5s_ease-in-out_infinite]"
               style={{
                 background: 'radial-gradient(circle at 50% 32%, rgba(251,191,36,0.22) 0%, rgba(245,158,11,0.08) 42%, rgba(250,247,242,0) 72%)',
                 border: '1px solid rgba(245,158,11,0.28)',
@@ -381,9 +381,9 @@ export default function MemorialPage() {
               }}
             >
               {/* Central flame enlarged with warm radiant diffusion */}
-              <div className="relative flex items-center justify-center my-0.5 md:my-1 transform scale-110 md:scale-125">
+              <div className="relative flex items-center justify-center -my-1.5 sm:-my-1 md:my-1 transform scale-95 sm:scale-105 md:scale-125">
                 <div
-                  className="absolute w-24 h-24 rounded-full pointer-events-none"
+                  className="absolute w-20 h-20 md:w-24 md:h-24 rounded-full pointer-events-none"
                   style={{
                     background: 'radial-gradient(circle, rgba(251,191,36,0.45) 0%, rgba(245,158,11,0.2) 45%, transparent 70%)',
                     filter: 'blur(6px)',
@@ -393,47 +393,47 @@ export default function MemorialPage() {
               </div>
 
               <p
-                className="mt-1 text-xs md:text-sm text-[#8A7A6E] italic text-center leading-relaxed"
+                className="mt-0.5 md:mt-1 text-xs md:text-sm text-[#8A7A6E] italic text-center leading-snug"
                 style={{ fontFamily: "'Libre Caslon Text', 'Georgia', serif" }}
               >
                 This candle is burning for {petName || 'this beautiful soul'}.
               </p>
 
-              <div className="mt-2 md:mt-3 bg-[#F5efe6]/80 px-3 py-1 md:px-4 md:py-1.5 rounded-full border border-[#E9dfd3]/80">
+              <div className="mt-1.5 md:mt-3 bg-[#F5efe6]/80 px-3 py-0.5 md:px-4 md:py-1.5 rounded-full border border-[#E9dfd3]/80">
                 <p className="text-[11px] md:text-xs text-[#5A5047]">
                   The flame burns until <span className="font-semibold">{formatDate(candleExpiresAt)}</span>
                 </p>
               </div>
 
               {parsedMemorial?.isBanned ? (
-                <div className="mt-3 md:mt-4 text-center p-2.5 md:p-3 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 shadow-sm w-full max-w-xs">
+                <div className="mt-2.5 md:mt-4 text-center p-2.5 md:p-3 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 shadow-sm w-full max-w-xs">
                   🔒 Candle lighting is disabled for suspended memorials.
                 </div>
               ) : (
                 <button
                   type="button"
                   onClick={handleIgniteClick}
-                  className="mt-3 md:mt-4 w-full max-w-xs bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white px-5 py-2.5 md:px-6 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm uppercase tracking-widest hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                  className="mt-2.5 md:mt-4 w-full max-w-xs bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white px-5 py-2.5 md:px-6 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm uppercase tracking-widest hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
                 >
                   Keep the Flame Alive
                 </button>
               )}
 
               {/* ── Integrated Collective Altar ──────────────────── */}
-              <div className="w-full border-t border-amber-900/10 my-3 md:my-4 pt-2.5 md:pt-3">
+              <div className="w-full border-t border-amber-900/10 mt-2.5 md:mt-4 pt-2 md:pt-3">
                 <CandleAltar totalCandles={totalCandles} expiryTimestamp={expiryTimestamp} isBurning={true} />
               </div>
             </div>
           ) : (
             <div
-              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-4 sm:px-5 sm:py-5 md:px-6 md:py-6 flex flex-col items-center"
+              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-3.5 sm:px-5 sm:py-4 md:px-6 md:py-6 flex flex-col items-center"
               style={{
                 background: 'radial-gradient(circle at 50% 32%, rgba(200,180,160,0.12) 0%, rgba(250,247,242,0) 70%)',
                 border: '1px solid rgba(180,160,140,0.2)',
               }}
             >
-              <div className="w-10 h-10 md:w-14 md:h-14 rounded-full bg-[#F5efe6] flex items-center justify-center mb-2 md:mb-3">
-                <span className="material-symbols-outlined text-xl md:text-2xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
+              <div className="w-9 h-9 md:w-14 md:h-14 rounded-full bg-[#F5efe6] flex items-center justify-center mb-1.5 md:mb-3">
+                <span className="material-symbols-outlined text-lg md:text-2xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
               </div>
               <h3
                 className="text-base md:text-lg text-[#2C2520] mb-0.5 md:mb-1"
@@ -441,7 +441,7 @@ export default function MemorialPage() {
               >
                 The Flame Has Faded
               </h3>
-              <p className="text-[11px] md:text-xs text-[#8A7A6E] max-w-xs text-center leading-relaxed mb-3 md:mb-4">
+              <p className="text-[11px] md:text-xs text-[#8A7A6E] max-w-xs text-center leading-snug mb-2.5 md:mb-4">
                 Light a virtual candle to keep {petName}&apos;s memory shining brightly.
               </p>
 
@@ -460,7 +460,7 @@ export default function MemorialPage() {
               )}
 
               {/* ── Integrated Collective Altar ──────────────────── */}
-              <div className="w-full border-t border-amber-900/10 my-3 md:my-4 pt-2.5 md:pt-3">
+              <div className="w-full border-t border-amber-900/10 mt-2.5 md:mt-4 pt-2 md:pt-3">
                 <CandleAltar totalCandles={totalCandles} expiryTimestamp={0} isBurning={false} />
               </div>
             </div>
@@ -469,7 +469,7 @@ export default function MemorialPage() {
 
         {/* Bio / Memory Narrative (Mobile: order-3, Desktop: order-2) */}
         {description && (
-          <div className="order-3 md:order-2 w-full max-w-2xl mx-auto bg-surface p-5 sm:p-6 md:p-10 rounded-[20px] md:rounded-[24px] border border-outline-variant/20 shadow-sm text-center mb-6 md:mb-12">
+          <div className="order-3 md:order-2 w-full max-w-2xl mx-auto bg-surface p-5 sm:p-6 md:p-10 rounded-[20px] md:rounded-[24px] border border-outline-variant/20 shadow-sm text-center mb-3 md:mb-6">
             <div
               className="text-4xl md:text-6xl leading-none text-[#d8c2ba] opacity-70 select-none mb-0.5 md:mb-1"
               style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
