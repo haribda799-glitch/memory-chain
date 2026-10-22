@@ -12,6 +12,49 @@ import ReportModal from './ReportModal';
 import ShareModal from './ShareModal';
 import { parseMemorial } from '../utils/memorialParser';
 
+/**
+ * Classic memorial arch radii.
+ * Tailwind's `rounded-t-full rounded-b-*` cannot be used here: CSS scales ALL corner
+ * radii down proportionally when adjacent radii exceed the box size, which collapses
+ * the soft bottom corners to ~0px. Explicit elliptical radii avoid that scaling.
+ * With a 4:5 frame, 50% horizontal / 40% vertical produces a true semicircular vault.
+ */
+const ARCH_OUTER_RADIUS = '50% 50% 1rem 1rem / 40% 40% 1rem 1rem';
+const ARCH_INNER_RADIUS = '50% 50% 0.75rem 0.75rem / 40% 40% 0.75rem 0.75rem';
+
+const FALLBACK_PORTRAIT = 'https://images.unsplash.com/photo-1544568100-847a948585b9?auto=format&fit=crop&w=800&q=80';
+
+// Placeholder values entered in the creation form that must never be displayed.
+const EMPTY_TRAIT_VALUES = new Set(['', 'no', 'none', 'n/a', 'na', 'unknown', '-', '—', 'null', 'undefined']);
+const cleanTrait = (value) => {
+  const text = String(value ?? '').trim();
+  return EMPTY_TRAIT_VALUES.has(text.toLowerCase()) ? '' : text;
+};
+
+/** Tiny flame glyph used inside the compact mobile tribute box. */
+function MiniFlame({ delay = 0, unlit = false }) {
+  if (unlit) {
+    return (
+      <svg width="12" height="17" viewBox="0 0 15 22" fill="none" aria-hidden="true" className="shrink-0 text-[#b5a79a]">
+        <path
+          d="M7.5 1.5C7.5 1.5 2 7.5 2 13C2 16.5 4.5 19.5 7.5 19.5C10.5 19.5 13 16.5 13 13C13 7.5 7.5 1.5 7.5 1.5Z"
+          stroke="currentColor" strokeWidth="1.2" strokeDasharray="2.5 1.5" fill="currentColor" fillOpacity="0.06"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      width="11" height="16" viewBox="0 0 15 22" fill="none" aria-hidden="true"
+      className="shrink-0 animate-[flameFloat_3s_ease-in-out_infinite]"
+      style={{ filter: 'drop-shadow(0 0 3px rgba(245,158,11,0.6))', animationDelay: `${delay}s` }}
+    >
+      <path d="M7.5 0C7.5 0 1.5 7.5 1.5 13C1.5 16.5 4.2 19.5 7.5 19.5C10.8 19.5 13.5 16.5 13.5 13C13.5 7.5 7.5 0 7.5 0Z" fill="#F59E0B" />
+      <path d="M7.5 7C7.5 7 4.5 11 4.5 13.5C4.5 15.2 5.8 16.5 7.5 16.5C9.2 16.5 10.5 15.2 10.5 13.5C10.5 11 7.5 7 7.5 7Z" fill="#FEF3C7" opacity="0.85" />
+    </svg>
+  );
+}
+
 export default function MemorialPage() {
   const { id } = useParams();
   const chainId = useChainId();
@@ -240,9 +283,12 @@ export default function MemorialPage() {
 
   if (isLoading) {
     return (
-      <div className="pt-20 sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6] animate-pulse">
+      <div className="pt-[4.5rem] sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6] animate-pulse">
         <div className="max-w-2xl mx-auto px-6 md:px-0 space-y-4 md:space-y-6">
-          <div className="w-32 h-32 sm:w-36 sm:h-36 md:w-48 md:h-48 lg:w-64 lg:h-64 rounded-full bg-[#efeeeb] mx-auto" />
+          <div
+            className="h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] md:h-80 aspect-[4/5] bg-[#efeeeb] mx-auto"
+            style={{ borderRadius: ARCH_OUTER_RADIUS }}
+          />
           <div className="h-8 md:h-10 bg-[#efeeeb] rounded w-1/2 mx-auto" />
           <div className="h-4 bg-[#efeeeb] rounded w-1/3 mx-auto" />
         </div>
@@ -287,8 +333,8 @@ export default function MemorialPage() {
 
   const birthDate    = findAttr('Birth Date');
   const memorialDate = findAttr('Memorial Date');
-  const speciesVal   = findAttr('Species');
-  const breedVal     = findAttr('Breed');
+  // Placeholder answers ("no", "none", "n/a", ...) are filtered out entirely
+  const breedVal     = cleanTrait(metadata?.breed || findAttr('Breed'));
 
   // Fix #3: check top-level fields first (written by new buildNftMetadata),
   // then fall back to attributes array for older mints
@@ -297,16 +343,35 @@ export default function MemorialPage() {
   const passingYear = metadata?.passing_year || findAttr('Passing Year')
     || (memorialDate ? new Date(Number(memorialDate) < 1e12 ? memorialDate * 1000 : memorialDate).getFullYear() : null);
 
+  const formatShortDate = (val) => {
+    const ms = Number(val) < 1e12 ? Number(val) * 1000 : Number(val);
+    return new Date(ms).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
   const dateDisplay = (birthYear && passingYear)
     ? `${birthYear} – ${passingYear}`
-    : (createdAt ? formatDate(Number(createdAt)) : 'Date unknown');
+    : (createdAt ? formatShortDate(createdAt) : '');
 
-  const avatarGlowClass = isBurning
-    ? 'border-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-shadow duration-700 animate-[avatarCandleGlow_4s_ease-in-out_infinite]'
-    : 'border-surface shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-shadow duration-700';
+  // Single elegant subtitle line: "Golden Retriever · 2025 – 2026" / "Beloved Companion · Oct 5, 2026"
+  const lineage = breedVal || 'Beloved Companion';
+
+  const archGlowClass = isBurning
+    ? 'shadow-[0_12px_45px_rgba(245,158,11,0.3)] animate-[archCandleGlow_4s_ease-in-out_infinite]'
+    : 'shadow-[0_10px_30px_rgba(60,40,20,0.12)]';
+
+  // Compact mobile tribute box copy
+  const candleWord = totalCandles === 1 ? 'candle' : 'candles';
+  const tributeHeadline = isBurning
+    ? `${totalCandles} ${candleWord} burning in loving memory`
+    : totalCandles > 0
+      ? `${totalCandles} ${candleWord} lit in loving memory`
+      : 'Be the first to light a candle';
+  const tributeSubline = isBurning
+    ? `Flame active until ${formatDate(candleExpiresAt)}`
+    : 'The flame is resting';
 
   return (
-    <div className="pt-20 sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6]">
+    <div className="pt-[4.5rem] sm:pt-24 md:pt-32 pb-12 md:pb-16 min-h-screen bg-[#fbf9f6]">
       <main className="flex-grow flex flex-col items-center gap-3 sm:gap-4 md:gap-6 px-4 w-full max-w-7xl mx-auto">
 
         {/* Council Ban Banner */}
@@ -333,44 +398,107 @@ export default function MemorialPage() {
           </div>
         )}
 
-        {/* Portrait & Header (Mobile: order-1, Desktop: order-1) */}
-        <div className="order-1 md:order-1 flex flex-col items-center text-center gap-2 sm:gap-3 md:gap-5 w-full max-w-2xl mx-auto mb-1 md:mb-4">
-          <div className={`relative w-32 h-32 sm:w-36 sm:h-36 md:w-48 md:h-48 lg:w-64 lg:h-64 rounded-full overflow-hidden border-[3px] md:border-4 mx-auto transition-all duration-700 ${avatarGlowClass}`}>
-            <img 
-              alt={petName ? `Memorial for ${petName}` : 'Pet portrait'} 
-              className="w-full h-full object-cover" 
-              src={imageUrl || 'https://images.unsplash.com/photo-1544568100-847a948585b9?auto=format&fit=crop&w=800&q=80'}
-              onError={(e) => { e.currentTarget.src = 'https://images.unsplash.com/photo-1544568100-847a948585b9?auto=format&fit=crop&w=800&q=80'; }}
-            />
-          </div>
-          <div className="space-y-1 md:space-y-2">
-            <h1 className="font-display-lg-mobile md:font-display-lg text-2xl sm:text-3xl md:text-display-lg text-[#2C2520] tracking-tight leading-tight">
-              {petName}
-            </h1>
-            <p className="font-label-md text-[11px] md:text-label-md text-[#5A5047] uppercase tracking-wider">
-              {dateDisplay}
-            </p>
-            <div className="flex flex-wrap justify-center items-center gap-1.5 md:gap-2 pt-0.5 md:pt-2">
-              {speciesVal ? (
-                <span className="px-3 py-0.5 md:px-4 md:py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-bold text-[10px] md:text-[11px] uppercase tracking-wider">
-                  {speciesVal}
-                </span>
-              ) : (
-                <span className="px-3 py-0.5 md:px-4 md:py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-bold text-[10px] md:text-[11px] uppercase tracking-wider">
-                  Companion
-                </span>
-              )}
-              {breedVal && (
-                <span className="px-3 py-0.5 md:px-4 md:py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-bold text-[10px] md:text-[11px] uppercase tracking-wider">
-                  {breedVal}
-                </span>
-              )}
+        {/* Memorial Arch Portrait, Altar Flame & Header (Mobile: order-1, Desktop: order-1) */}
+        <div className="order-1 md:order-1 flex flex-col items-center text-center w-full max-w-2xl mx-auto md:mb-4">
+          {/* Double-framed classic memorial arch */}
+          <div
+            className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] md:h-80 aspect-[4/5] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
+            style={{ borderRadius: ARCH_OUTER_RADIUS }}
+          >
+            <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: ARCH_INNER_RADIUS }}>
+              <img
+                alt={petName ? `Memorial for ${petName}` : 'Pet portrait'}
+                className="w-full h-full object-cover"
+                src={imageUrl || FALLBACK_PORTRAIT}
+                onError={(e) => { e.currentTarget.src = FALLBACK_PORTRAIT; }}
+              />
+              {/* Warm bottom-up vignette so the altar flame reads with depth */}
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 bg-gradient-to-t from-amber-950/35 via-transparent to-transparent pointer-events-none"
+              />
             </div>
           </div>
+
+          {/* Integrated living flame standing on the arch base */}
+          {isBurning ? (
+            <div className="relative z-10 -mt-14 flex flex-col items-center">
+              <div
+                aria-hidden="true"
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-24 h-24 bg-amber-400/25 blur-xl rounded-full pointer-events-none"
+              />
+              {/* Full-size flame; overlap tuned so the flame base rests on the arch's lower rim */}
+              <div className="relative scale-125 origin-[50%_74%]">
+                <Candle petName={petName} showCaption={false} />
+              </div>
+            </div>
+          ) : (
+            <div
+              className="relative z-10 -mt-5 w-10 h-10 rounded-full bg-[#fbf9f6] border border-amber-900/15 shadow-sm flex items-center justify-center"
+              title="The flame is resting"
+            >
+              <span className="material-symbols-outlined text-xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
+            </div>
+          )}
+
+          <h1
+            className="mt-2 text-3xl sm:text-4xl md:text-display-lg font-serif tracking-wide md:tracking-normal text-[#2C2520] leading-tight"
+            style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+          >
+            {petName}
+          </h1>
+          <p className="mt-1 md:mt-2 text-[13px] md:text-sm text-[#6B5E54] tracking-wide">
+            {lineage}
+            {dateDisplay && (
+              <>
+                <span className="mx-1.5 text-amber-700/60" aria-hidden="true">·</span>
+                {dateDisplay}
+              </>
+            )}
+          </p>
         </div>
 
-        {/* ── Sacred Flame Alcove & Collective Altar (Mobile: order-2, Desktop: order-3) ──────────── */}
-        <div className="order-2 md:order-3 w-full max-w-md mx-auto mb-2 sm:mb-3 md:mb-10 flex flex-col items-center">
+        {/* ── Compact Tribute Box (Mobile only: order-2) ──────────── */}
+        <section
+          aria-label="Candle tribute"
+          className="order-2 md:hidden mt-1 px-4 py-3.5 rounded-2xl bg-amber-50/70 border border-amber-900/10 max-w-sm w-full mx-auto flex flex-col items-center text-center"
+        >
+          <div className="flex items-center justify-center gap-2">
+            {isBurning && totalCandles > 0 ? (
+              <span className="flex items-center gap-1">
+                {Array.from({ length: Math.min(totalCandles, 5) }).map((_, i) => (
+                  <MiniFlame key={i} delay={i * 0.35} />
+                ))}
+              </span>
+            ) : (
+              <MiniFlame unlit />
+            )}
+            <p
+              className="text-[13px] text-[#4A4038] leading-snug"
+              style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+            >
+              {tributeHeadline}
+            </p>
+          </div>
+          <p className="mt-0.5 text-[11px] text-[#8A7A6E]">{tributeSubline}</p>
+
+          {parsedMemorial?.isBanned ? (
+            <div className="mt-3 w-full text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200">
+              🔒 Candle lighting is disabled for suspended memorials.
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleIgniteClick}
+              className="mt-3 w-full bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white py-2.5 rounded-xl font-bold text-xs uppercase tracking-widest shadow-[0_4px_14px_rgba(192,122,93,0.3)] active:scale-[0.98] transition-transform cursor-pointer"
+            >
+              {isBurning ? 'Keep the Flame Alive' : 'Light a Candle'}
+            </button>
+          )}
+        </section>
+
+        {/* ── Sacred Flame Alcove & Collective Altar (Desktop only: order-3) ──────────── */}
+        <div className="hidden md:flex md:order-3 w-full max-w-md mx-auto md:mb-10 flex-col items-center">
           {isBurning ? (
             <div
               className="relative w-full rounded-2xl md:rounded-3xl px-4 py-3.5 sm:px-5 sm:py-4 md:px-6 md:py-6 flex flex-col items-center animate-[alcoveBreath_5s_ease-in-out_infinite]"
@@ -613,14 +741,14 @@ export default function MemorialPage() {
             opacity: 1;
           }
         }
-        @keyframes avatarCandleGlow {
+        @keyframes archCandleGlow {
           0%, 100% {
-            box-shadow: 0 0 22px 2px rgba(245, 158, 11, 0.3), 0 0 45px 6px rgba(251, 191, 36, 0.18);
-            border-color: rgba(245, 158, 11, 0.5);
+            box-shadow: 0 12px 45px rgba(245, 158, 11, 0.3);
+            border-color: rgba(245, 158, 11, 0.35);
           }
           50% {
-            box-shadow: 0 0 36px 6px rgba(245, 158, 11, 0.48), 0 0 60px 10px rgba(251, 191, 36, 0.28);
-            border-color: rgba(245, 158, 11, 0.8);
+            box-shadow: 0 14px 58px rgba(245, 158, 11, 0.44);
+            border-color: rgba(245, 158, 11, 0.6);
           }
         }
       `}</style>
