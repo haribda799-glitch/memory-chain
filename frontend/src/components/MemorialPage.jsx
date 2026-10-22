@@ -1,10 +1,10 @@
 import { useParams, Link } from 'react-router-dom';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { useReadContract, useChainId } from 'wagmi';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
-import { getArweaveUrl } from '../utils/arweave';
+import { getArweaveUrl, isMockTxId, TESTNET_TEMPORARY_STORAGE_NOTICE } from '../utils/arweave';
 import Candle from './Candle';
 import CandleAltar from './CandleAltar';
 import LightCandleModal from './LightCandleModal';
@@ -30,6 +30,53 @@ const cleanTrait = (value) => {
   const text = String(value ?? '').trim();
   return EMPTY_TRAIT_VALUES.has(text.toLowerCase()) ? '' : text;
 };
+
+/** Vibrant golden-amber flame rendered inside the high-contrast arch base medallion. */
+function MedallionFlame() {
+  const uid = useId().replace(/:/g, '');
+  return (
+    <svg
+      width="22"
+      height="30"
+      viewBox="0 0 22 30"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      className="relative z-10 animate-[medallionFlameFlicker_2.6s_ease-in-out_infinite]"
+      style={{ filter: 'drop-shadow(0 0 6px rgba(245, 158, 11, 0.75))' }}
+    >
+      {/* Outer golden-amber flame (#F59E0B -> #FBBF24) */}
+      <path
+        d="M11 1.5C11 1.5 3 10.8 3 18.5C3 23.4 6.58 27.2 11 27.2C15.42 27.2 19 23.4 19 18.5C19 10.8 11 1.5 11 1.5Z"
+        fill={`url(#medallionOuter_${uid})`}
+      />
+      {/* Middle warm amber-yellow layer */}
+      <path
+        d="M11 6.5C11 6.5 5.5 13.5 5.5 18.8C5.5 22.1 7.96 24.8 11 24.8C14.04 24.8 16.5 22.1 16.5 18.8C16.5 13.5 11 6.5 11 6.5Z"
+        fill={`url(#medallionMid_${uid})`}
+        opacity="0.95"
+      />
+      {/* Inner glowing white-yellow core */}
+      <path
+        d="M11 11.5C11 11.5 7.5 16.2 7.5 19.5C7.5 21.6 9.07 23.3 11 23.3C12.93 23.3 14.5 21.6 14.5 19.5C14.5 16.2 11 11.5 11 11.5Z"
+        fill="#FEF3C7"
+      />
+      <ellipse cx="11" cy="20.5" rx="2.2" ry="1.8" fill="#FFFBEB" />
+      <defs>
+        <linearGradient id={`medallionOuter_${uid}`} x1="11" y1="1.5" x2="11" y2="27.2" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FBBF24" />
+          <stop offset="55%" stopColor="#F59E0B" />
+          <stop offset="100%" stopColor="#D97706" />
+        </linearGradient>
+        <linearGradient id={`medallionMid_${uid}`} x1="11" y1="6.5" x2="11" y2="24.8" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FEF08A" />
+          <stop offset="55%" stopColor="#FBBF24" />
+          <stop offset="100%" stopColor="#F59E0B" />
+        </linearGradient>
+      </defs>
+    </svg>
+  );
+}
 
 /** Tiny flame glyph used inside the compact mobile tribute box. */
 function MiniFlame({ delay = 0, unlit = false }) {
@@ -320,8 +367,30 @@ export default function MemorialPage() {
     ? `https://arweave.net/${rawImage.slice(5)}`
     : rawImage;
 
-  // description covers "A Brief Memory" form field; fall back to epitaph alias
-  const description = metadata?.description || metadata?.epitaph || '';
+  // Resolve epitaph/story: never allow the technical testnet storage notice to replace the poetic quote card
+  const rawDescription = String(metadata?.epitaph || metadata?.description || '').trim();
+  const isSystemStorageNotice =
+    rawDescription.startsWith('This memorial was created on testnet with temporary storage') ||
+    rawDescription === 'Metadata temporarily unavailable';
+
+  const isTestnetTemporaryStorage =
+    isMockTxId(arweaveTxId) ||
+    Boolean(metadata?.isTemporaryStoragePlaceholder) ||
+    rawDescription.startsWith('This memorial was created on testnet with temporary storage');
+
+  let localSavedEpitaph = '';
+  if (typeof window !== 'undefined' && window.localStorage && petName) {
+    try {
+      localSavedEpitaph = window.localStorage.getItem(`mc_epitaph_${String(petName).trim().toLowerCase()}`) || '';
+    } catch {
+      localSavedEpitaph = '';
+    }
+  }
+
+  const description = (!isSystemStorageNotice && rawDescription)
+    ? rawDescription
+    : (localSavedEpitaph || `In loving memory of ${petName || 'this beloved companion'}. Forever on the blockchain.`);
+
   const attributes  = metadata?.attributes  || [];
   const findAttr    = (trait) => attributes.find(a => a.trait_type === trait)?.value;
 
@@ -352,7 +421,7 @@ export default function MemorialPage() {
     ? `${birthYear} – ${passingYear}`
     : (createdAt ? formatShortDate(createdAt) : '');
 
-  // Single elegant subtitle line: "Golden Retriever · 2025 – 2026" / "Beloved Companion · Oct 5, 2026"
+  // Single elegant subtitle line: "Golden Retriever • 2025 – 2026" / "Beloved Companion • Oct 5, 2026"
   const lineage = breedVal || 'Beloved Companion';
 
   const archGlowClass = isBurning
@@ -360,11 +429,12 @@ export default function MemorialPage() {
     : 'shadow-[0_10px_30px_rgba(60,40,20,0.12)]';
 
   // Compact mobile tribute box copy
-  const candleWord = totalCandles === 1 ? 'candle' : 'candles';
+  const candlesCount = totalCandles;
+  const candleWord = candlesCount === 1 ? 'candle' : 'candles';
   const tributeHeadline = isBurning
-    ? `${totalCandles} ${candleWord} burning in loving memory`
-    : totalCandles > 0
-      ? `${totalCandles} ${candleWord} lit in loving memory`
+    ? `${candlesCount} ${candleWord} burning in loving memory`
+    : candlesCount > 0
+      ? `${candlesCount} ${candleWord} lit in loving memory`
       : 'Be the first to light a candle';
   const tributeSubline = isBurning
     ? `Flame active until ${formatDate(candleExpiresAt)}`
@@ -390,11 +460,11 @@ export default function MemorialPage() {
           </div>
         )}
 
-        {/* Private / Unlisted Banner */}
+        {/* Private / Unlisted Compact Capsule */}
         {parsedMemorial?.isPublic === false && (
-          <div className="order-0 md:order-0 w-full max-w-2xl bg-stone-100/90 border border-stone-300 rounded-xl md:rounded-2xl p-2 md:p-3.5 text-center text-stone-700 text-[11px] md:text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
-            <span className="material-symbols-outlined text-stone-600 text-base">lock</span>
-            <span>Private / Unlisted Memorial (Hidden from public gallery)</span>
+          <div className="order-0 md:order-0 inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-amber-950/5 border border-amber-900/10 text-xs text-stone-600 mb-2">
+            <span aria-hidden="true">🔒</span>
+            <span>Private Memorial · Hidden from public gallery</span>
           </div>
         )}
 
@@ -420,21 +490,21 @@ export default function MemorialPage() {
             </div>
           </div>
 
-          {/* Integrated living flame standing on the arch base */}
+          {/* High-contrast medallion candle holder at the base of the arch */}
           {isBurning ? (
-            <div className="relative z-10 -mt-14 flex flex-col items-center">
+            <div
+              className="w-12 h-12 rounded-full bg-[#FFFDF9] border-2 border-amber-400/80 shadow-[0_4px_20px_rgba(245,158,11,0.45)] flex items-center justify-center -mt-6 z-10 relative animate-[medallionPulse_3s_ease-in-out_infinite]"
+              title={`Candle burning for ${petName || 'this beloved companion'}`}
+            >
               <div
                 aria-hidden="true"
-                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-24 h-24 bg-amber-400/25 blur-xl rounded-full pointer-events-none"
+                className="absolute -inset-2.5 bg-amber-400/25 blur-lg rounded-full pointer-events-none"
               />
-              {/* Full-size flame; overlap tuned so the flame base rests on the arch's lower rim */}
-              <div className="relative scale-125 origin-[50%_74%]">
-                <Candle petName={petName} showCaption={false} />
-              </div>
+              <MedallionFlame />
             </div>
           ) : (
             <div
-              className="relative z-10 -mt-5 w-10 h-10 rounded-full bg-[#fbf9f6] border border-amber-900/15 shadow-sm flex items-center justify-center"
+              className="w-11 h-11 rounded-full bg-[#FFFDF9] border border-amber-900/15 shadow-sm flex items-center justify-center -mt-5 z-10 relative"
               title="The flame is resting"
             >
               <span className="material-symbols-outlined text-xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
@@ -451,7 +521,7 @@ export default function MemorialPage() {
             {lineage}
             {dateDisplay && (
               <>
-                <span className="mx-1.5 text-amber-700/60" aria-hidden="true">·</span>
+                <span className="mx-2 text-amber-600/70" aria-hidden="true">•</span>
                 {dateDisplay}
               </>
             )}
@@ -463,10 +533,10 @@ export default function MemorialPage() {
           aria-label="Candle tribute"
           className="order-2 md:hidden mt-1 px-4 py-3.5 rounded-2xl bg-amber-50/70 border border-amber-900/10 max-w-sm w-full mx-auto flex flex-col items-center text-center"
         >
-          <div className="flex items-center justify-center gap-2">
-            {isBurning && totalCandles > 0 ? (
-              <span className="flex items-center gap-1">
-                {Array.from({ length: Math.min(totalCandles, 5) }).map((_, i) => (
+          <div className="flex items-center justify-center gap-2 flex-nowrap">
+            {isBurning && candlesCount > 0 ? (
+              <span className="inline-flex items-center gap-1 shrink-0">
+                {Array.from({ length: Math.min(candlesCount, 5) }).map((_, i) => (
                   <MiniFlame key={i} delay={i * 0.35} />
                 ))}
               </span>
@@ -677,6 +747,13 @@ export default function MemorialPage() {
             )}
           </div>
         </div>
+
+        {/* Subtle technical footnote for testnet temporary storage (kept out of the poetic Quote Card) */}
+        {isTestnetTemporaryStorage && (
+          <p className="order-5 md:order-5 text-xs text-stone-400 text-center max-w-md mx-auto pt-2 leading-relaxed">
+            {TESTNET_TEMPORARY_STORAGE_NOTICE}
+          </p>
+        )}
       </main>
 
       {/* Candle Modal */}
@@ -749,6 +826,24 @@ export default function MemorialPage() {
           50% {
             box-shadow: 0 14px 58px rgba(245, 158, 11, 0.44);
             border-color: rgba(245, 158, 11, 0.6);
+          }
+        }
+        @keyframes medallionPulse {
+          0%, 100% {
+            box-shadow: 0 4px 20px rgba(245, 158, 11, 0.45), 0 0 10px rgba(251, 191, 36, 0.25);
+            border-color: rgba(251, 191, 36, 0.8);
+          }
+          50% {
+            box-shadow: 0 4px 26px rgba(245, 158, 11, 0.65), 0 0 18px rgba(251, 191, 36, 0.45);
+            border-color: rgba(245, 158, 11, 0.95);
+          }
+        }
+        @keyframes medallionFlameFlicker {
+          0%, 100% {
+            transform: translateY(0) scale(1);
+          }
+          50% {
+            transform: translateY(-1.5px) scale(1.04);
           }
         }
       `}</style>

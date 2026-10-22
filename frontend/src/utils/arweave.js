@@ -53,12 +53,17 @@ function jsonToDataUrl(json) {
   return `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
 }
 
+export const TESTNET_TEMPORARY_STORAGE_NOTICE =
+  'This memorial was created on testnet with temporary storage. Its photo and story are only available on the device where it was created.';
+
 const MOCK_PLACEHOLDER_METADATA = JSON.stringify({
   name: 'Memorial',
-  description:
-    'This memorial was created on testnet with temporary storage. Its photo and story are only available on the device where it was created.',
+  description: '',
+  epitaph: '',
   image: '',
   attributes: [],
+  isTemporaryStoragePlaceholder: true,
+  temporaryStorageNotice: TESTNET_TEMPORARY_STORAGE_NOTICE,
 });
 
 function resolveMockUrl(txId) {
@@ -280,18 +285,42 @@ export async function uploadJsonToArweave(metadata) {
   const mode = await resolveStorageMode();
   if (mode === 'mock') {
     const mockTxId = generateMockTxId();
+    const storageKey = `${MOCK_STORAGE_PREFIX}${mockTxId}`;
     let json = JSON.stringify(metadata);
     mockMemoryStore.set(mockTxId, json);
     try {
-      window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}${mockTxId}`, json);
+      window.localStorage.setItem(storageKey, json);
     } catch (err) {
-      // Quota exceeded (large image) — persist the text metadata without the photo
-      console.warn('[MOCK] localStorage quota exceeded, storing metadata without image:', err?.name || err);
-      json = JSON.stringify({ ...metadata, image: '' });
+      // Quota exceeded (large base64 image) — first strip base64 images from older mock entries
+      // while preserving their text metadata (epitaph/description, dates, breed) so user stories are never lost.
+      console.warn('[MOCK] localStorage quota reached, compacting older mock images:', err?.name || err);
       try {
-        window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}${mockTxId}`, json);
-      } catch (err2) {
-        console.warn('[MOCK] Could not persist metadata; it will be available for this session only.', err2);
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith(MOCK_STORAGE_PREFIX) && k !== storageKey) {
+            const rawOld = window.localStorage.getItem(k);
+            if (rawOld && rawOld.length > 2048) {
+              try {
+                const parsedOld = JSON.parse(rawOld);
+                if (parsedOld && parsedOld.image) {
+                  parsedOld.image = '';
+                  window.localStorage.setItem(k, JSON.stringify(parsedOld));
+                }
+              } catch {
+                // ignore malformed entry
+              }
+            }
+          }
+        }
+        window.localStorage.setItem(storageKey, json);
+      } catch {
+        // Still over quota — persist this memorial's text metadata (epitaph, dates, attributes) without the photo
+        json = JSON.stringify({ ...metadata, image: '' });
+        try {
+          window.localStorage.setItem(storageKey, json);
+        } catch (err2) {
+          console.warn('[MOCK] Could not persist metadata; it will be available for this session only.', err2);
+        }
       }
     }
     console.log('[MOCK] Stored metadata locally:', mockTxId, metadata);
@@ -376,11 +405,26 @@ export function buildNftMetadata({
       ? (mockMemoryStore.get(imageTxId) || '')
       : (import.meta.env.DEV ? `${ARWEAVE_GATEWAY}/${imageTxId}` : `ar://${imageTxId}`);
 
+  const cleanUserEpitaph = typeof description === 'string' ? description.trim() : '';
+  const finalEpitaph =
+    cleanUserEpitaph ||
+    `In loving memory of ${petName}. Forever on the blockchain.`;
+
+  if (typeof window !== 'undefined' && window.localStorage && petName) {
+    try {
+      window.localStorage.setItem(
+        `mc_epitaph_${String(petName).trim().toLowerCase()}`,
+        finalEpitaph
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
   const metadata = {
     name: `Memorial: ${petName}`,
-    description:
-      description ||
-      `In loving memory of ${petName}. Forever on the blockchain.`,
+    description: finalEpitaph,
+    epitaph: finalEpitaph,
     image: imageUrl,
     external_url: '',
     ...(resolvedBirthYear   ? { birth_year:   resolvedBirthYear   } : {}),
