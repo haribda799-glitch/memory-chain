@@ -5,10 +5,12 @@ import CreateMemorial from './components/CreateMemorial';
 import MemorialPage from './components/MemorialPage';
 import MyMemorials from './components/MyMemorials';
 import ErrorBoundary from './components/ErrorBoundary';
+import ScrollToTop from './components/ScrollToTop';
 
 export default function App() {
   return (
     <HashRouter>
+      <ScrollToTop />
       <div className="bg-background text-on-surface font-body-md antialiased min-h-screen flex flex-col">
         <Header />
         <main className="flex-grow">
@@ -27,7 +29,7 @@ export default function App() {
             <div className="font-headline-sm text-headline-sm text-primary flex flex-col items-center md:items-start">
               Memory Chain
               <span className="font-body-sm text-body-sm text-on-surface-variant mt-2 block">
-                © 2024 Memory Chain. Preserving eternal bonds on-chain.
+                © {new Date().getFullYear()} Memory Chain. Preserving eternal bonds on-chain.
               </span>
             </div>
             <div className="flex flex-wrap justify-center md:justify-end gap-6 font-body-sm text-body-sm font-label-md text-label-md">

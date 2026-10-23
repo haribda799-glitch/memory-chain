@@ -144,6 +144,11 @@ export default function MemorialPage() {
   const [pendingCandleOpen, setPendingCandleOpen] = useState(false);
   const [, setReportRefreshTrigger] = useState(0);
 
+  // Safeguard: scroll to top on mount and whenever memorial ID changes
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  }, [id]);
+
   const handleIgniteClick = () => {
     if (!authenticated) {
       setPendingCandleOpen(true);

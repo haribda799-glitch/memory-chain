@@ -6,7 +6,6 @@ import { getArweaveUrl } from '../utils/arweave';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { useNow } from '../hooks/useNow';
-import Candle from './Candle';
 import CandleAltar from './CandleAltar';
 import ReportModal from './ReportModal';
 
