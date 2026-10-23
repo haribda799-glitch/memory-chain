@@ -16,6 +16,8 @@ import { parseMemorial } from '../utils/memorialParser';
  * radii down proportionally when adjacent radii exceed the box size, which collapses
  * the soft bottom corners to ~0px. Explicit elliptical radii avoid that scaling.
  * With a 4:5 frame, 50% horizontal / 40% vertical produces a true semicircular vault.
+ * On desktop the arch is taller than 4:5 and has fixed widths, so it uses pixel radii equal to
+ * half its width (md:/lg: `[border-radius:...]!`, which overrides this inline style) to keep the vault semicircular.
  */
 const ARCH_OUTER_RADIUS = '50% 50% 1rem 1rem / 40% 40% 1rem 1rem';
 const ARCH_INNER_RADIUS = '50% 50% 0.75rem 0.75rem / 40% 40% 0.75rem 0.75rem';
@@ -552,7 +554,7 @@ export default function MemorialPage() {
           A single DOM tree is used for both layouts, so no block is ever duplicated.
         */}
         <div className="w-full max-w-2xl mx-auto md:max-w-4xl lg:max-w-5xl md:bg-[#FDFBF7]/90 md:border md:border-amber-900/10 md:rounded-[36px] md:p-8 lg:p-12 md:shadow-[0_20px_60px_rgba(120,80,40,0.06)]">
-          <div className="flex flex-col items-center gap-3 sm:gap-4 md:grid md:grid-cols-12 md:gap-8 lg:gap-12 md:items-start">
+          <div className="flex flex-col items-center gap-3 sm:gap-4 md:grid md:grid-cols-12 md:gap-0 md:items-center">
 
             {/* ── Left column (desktop only wrapper) ───────────────────────── */}
             <div className="contents md:flex md:flex-col md:items-center md:col-span-5 md:self-center">
@@ -561,10 +563,10 @@ export default function MemorialPage() {
               <div className="order-1 flex flex-col items-center text-center w-full">
                 {/* Double-framed classic memorial arch */}
                 <div
-                  className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] aspect-[4/5] md:w-64 md:h-80 lg:w-72 lg:h-[360px] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
+                  className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] aspect-[4/5] md:w-72 md:h-[390px] lg:w-80 lg:h-[425px] md:[border-radius:144px_144px_1rem_1rem]! lg:[border-radius:160px_160px_1rem_1rem]! p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
                   style={{ borderRadius: ARCH_OUTER_RADIUS }}
                 >
-                  <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: ARCH_INNER_RADIUS }}>
+                  <div className="relative w-full h-full overflow-hidden md:[border-radius:137px_137px_0.75rem_0.75rem]! lg:[border-radius:153px_153px_0.75rem_0.75rem]!" style={{ borderRadius: ARCH_INNER_RADIUS }}>
                     <img
                       alt={petName ? `Memorial for ${petName}` : 'Pet portrait'}
                       className="w-full h-full object-cover"
@@ -603,17 +605,17 @@ export default function MemorialPage() {
             </div>
 
             {/* ── Right column (desktop only wrapper) ──────────────────────── */}
-            <div className="contents md:flex md:flex-col md:items-stretch md:justify-center md:col-span-7 md:w-full md:pt-2 lg:pt-4">
+            <div className="contents md:flex md:flex-col md:items-stretch md:justify-center md:col-span-7 md:w-full md:pl-8 lg:pl-12">
 
               {/* Name & Dates (Mobile: order-2, glued under the medallion by cancelling the stack gap) */}
-              <div className="order-2 -mt-3 sm:-mt-4 md:mt-0 flex flex-col items-center md:items-start text-center md:text-left w-full max-w-2xl mx-auto md:mx-0 md:max-w-none">
+              <div className="order-2 -mt-3 sm:-mt-4 md:mt-0 flex flex-col items-center text-center w-full max-w-2xl mx-auto md:max-w-none">
                 <h1
                   className="mt-2 md:mt-0 text-3xl sm:text-4xl md:text-4xl lg:text-5xl font-serif tracking-wide md:tracking-normal text-[#2C2520] leading-tight"
                   style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
                 >
                   {petName}
                 </h1>
-                <p className="mt-1 md:mt-2 text-[13px] md:text-sm text-[#6B5E54] tracking-wide text-center md:text-left">
+                <p className="mt-1 md:mt-2 text-[13px] md:text-sm text-[#6B5E54] tracking-wide text-center">
                   {lineage}
                   {dateDisplay && (
                     <>
@@ -693,7 +695,7 @@ export default function MemorialPage() {
             </div>
             {/* ── Footer Strip: Eternal Provenance & Share/Report ──────────────────
                  Mobile: order-5, last block (unchanged). Desktop: full-width muted strip at the card base. */}
-            <div className="order-5 w-full max-w-2xl mx-auto flex flex-col items-center justify-between gap-6 pt-6 border-t border-outline-variant/20 md:col-span-12 md:max-w-none md:mt-4 md:pt-5 md:border-t md:border-amber-900/10 md:flex md:flex-row md:items-center md:justify-between md:gap-4">
+            <div className="order-5 w-full max-w-2xl mx-auto flex flex-col items-center justify-between gap-6 pt-6 border-t border-outline-variant/20 md:col-span-12 md:max-w-none md:mt-7 lg:mt-8 md:pt-5 md:border-t md:border-amber-900/10 md:flex md:flex-row md:items-center md:justify-between md:gap-4">
               <div className="flex items-start space-x-3 md:space-x-2 text-left md:min-w-0">
                 <div className="mt-1 md:mt-0">
                   <span className="material-symbols-outlined text-primary md:text-stone-400 md:text-lg">link</span>
