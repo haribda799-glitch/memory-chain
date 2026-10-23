@@ -552,12 +552,15 @@ export default function MemorialCard({
         )}
       </div>
 
-      <ReportModal
-        isOpen={showReportModal}
-        onClose={() => setShowReportModal(false)}
-        memorialId={tokenId}
-        petName={petName}
-      />
+      {/* Mounted only while open so Gallery cards don't each fire the modal's RPC reads */}
+      {showReportModal && (
+        <ReportModal
+          isOpen={showReportModal}
+          onClose={() => setShowReportModal(false)}
+          memorialId={tokenId}
+          petName={petName}
+        />
+      )}
     </>
   );
 }

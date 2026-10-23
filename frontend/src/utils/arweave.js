@@ -137,6 +137,28 @@ export function resolveStorageMode() {
   return storageModePromise;
 }
 
+// ── Per-memorial epitaph cache ───────────────────────────────
+// The user's story is cached under `mc_epitaph_tx_<metadataTxId>` (the metadata tx id is the value stored
+// on-chain as the memorial's arweave_uri), so memorials sharing a pet name never leak stories into each other.
+// The legacy name-keyed entry (`mc_epitaph_<petname lowercase>`) is still written for backward compatibility.
+export const EPITAPH_TX_STORAGE_PREFIX = 'mc_epitaph_tx_';
+
+export function getEpitaphStorageKeyForTx(metadataTxId) {
+  return `${EPITAPH_TX_STORAGE_PREFIX}${metadataTxId}`;
+}
+
+function persistEpitaphForTx(metadataTxId, metadata) {
+  // `bio` is only present when the user actually wrote a story (never the generic fallback epitaph)
+  const userEpitaph = typeof metadata?.bio === 'string' ? metadata.bio.trim() : '';
+  if (!metadataTxId || !userEpitaph) return;
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(getEpitaphStorageKeyForTx(metadataTxId), userEpitaph);
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 /**
  * Downscale an image File to a compact JPEG data URL (fits localStorage).
  * Resolves '' if the file can't be processed.
@@ -144,8 +166,9 @@ export function resolveStorageMode() {
 async function fileToCompactDataUrl(file, maxSide = 640, quality = 0.82) {
   if (!file || typeof document === 'undefined') return '';
   if (file.type?.startsWith('image/')) {
+    let objectUrl = '';
     try {
-      const objectUrl = URL.createObjectURL(file);
+      objectUrl = URL.createObjectURL(file);
       const img = await new Promise((resolve, reject) => {
         const el = new Image();
         el.onload = () => resolve(el);
@@ -157,10 +180,12 @@ async function fileToCompactDataUrl(file, maxSide = 640, quality = 0.82) {
       canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
       canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
       canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(objectUrl);
       return canvas.toDataURL('image/jpeg', quality);
     } catch (err) {
       console.warn('[MOCK] Image compression failed:', err);
+    } finally {
+      // Always release the blob URL, including on decode errors
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   }
   return '';
@@ -336,6 +361,7 @@ export async function uploadJsonToArweave(metadata) {
       }
     }
     console.log('[MOCK] Stored metadata locally:', mockTxId, metadata);
+    persistEpitaphForTx(mockTxId, metadata);
     return mockTxId;
   }
 
@@ -379,7 +405,20 @@ export async function uploadJsonToArweave(metadata) {
   }
 
   console.log('[Arweave] Metadata upload complete. TxID:', tx.id);
+  persistEpitaphForTx(tx.id, metadata);
   return tx.id;
+}
+
+/**
+ * Year of a date value. ISO strings (YYYY-MM-DD) are sliced directly: `new Date('YYYY-MM-DD')` parses as UTC
+ * midnight, so getFullYear() returns the previous year for Jan 1 in negative-UTC timezones.
+ */
+function yearFromDate(date) {
+  if (!date) return '';
+  const str = String(date);
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 4);
+  const parsed = new Date(date);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.getFullYear().toString();
 }
 
 /**
@@ -405,11 +444,11 @@ export function buildNftMetadata({
 }) {
   const resolvedBirthYear = birthYear
     ? birthYear.toString()
-    : (birthDate ? new Date(birthDate).getFullYear().toString() : '');
+    : yearFromDate(birthDate);
 
   const resolvedPassingYear = passingYear
     ? passingYear.toString()
-    : (memorialDate ? new Date(memorialDate).getFullYear().toString() : '');
+    : yearFromDate(memorialDate);
 
   const imageUrl = !imageTxId
     ? ''

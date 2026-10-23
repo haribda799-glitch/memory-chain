@@ -1,6 +1,6 @@
 import { useParams, Link } from 'react-router-dom';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { useReadContract, useChainId } from 'wagmi';
+import { useReadContract, useChainId, useAccount } from 'wagmi';
 import { useState, useEffect, useRef } from 'react';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
@@ -134,8 +134,12 @@ export default function MemorialPage() {
   const { authenticated, login, user } = usePrivy();
   const { wallets } = useWallets();
 
+  const { address: wagmiAddress } = useAccount();
+
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  const userAddress = embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
+  // Same priority as the transaction modals (the wagmi-connected account signs the txs),
+  // so isOwner / isReported always refer to the address that actually sends transactions.
+  const userAddress = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
 
   const [metadata, setMetadata] = useState(null);
   const [showCandleModal, setShowCandleModal] = useState(false);
@@ -310,6 +314,13 @@ export default function MemorialPage() {
 
   // When on-chain total increases (tx mined and refetched), clear optimistic extra
   const lastOnchainTotalRef = useRef(onchainTotal);
+
+  // The route component is reused between /memorial/:id pages — never carry optimistic candle state across memorials
+  useEffect(() => {
+    setLocalExtraCandles(0);
+    setLocalOptimisticExpiry(null);
+    lastOnchainTotalRef.current = 0;
+  }, [id]);
   useEffect(() => {
     if (onchainTotal > lastOnchainTotalRef.current) {
       setLocalExtraCandles(0);
@@ -339,12 +350,22 @@ export default function MemorialPage() {
     return () => clearTimeout(timeout);
   }, [candleExpiresAt]);
 
-  const handleCandleLit = (tierOrDuration = 1) => {
+  /**
+   * Optimistic update after a confirmed candle transaction.
+   * Accepts the explicit payload from LightCandleModal ({ type: 'tier' | 'custom', tier?, seconds })
+   * and, for backward compatibility, a bare tier id (1-4) or a duration in seconds.
+   */
+  const handleCandleLit = (payload = 1) => {
     const currentNow = Math.floor(Date.now() / 1000);
     const tierDurations = { 1: 3600, 2: 18000, 3: 43200, 4: 86400 };
-    const duration = typeof tierOrDuration === 'number' && tierDurations[tierOrDuration]
-      ? tierDurations[tierOrDuration]
-      : (typeof tierOrDuration === 'number' && tierOrDuration > 86400 ? tierOrDuration : 3600);
+    let duration = 3600;
+    if (payload && typeof payload === 'object') {
+      duration = payload.type === 'tier' && tierDurations[payload.tier]
+        ? tierDurations[payload.tier]
+        : Math.max(3600, Number(payload.seconds) || 3600);
+    } else if (typeof payload === 'number') {
+      duration = tierDurations[payload] ?? (payload >= 3600 ? payload : 3600);
+    }
 
     const baseStart = (localOptimisticExpiry && localOptimisticExpiry > currentNow)
       ? localOptimisticExpiry
@@ -441,7 +462,13 @@ export default function MemorialPage() {
   let localSavedEpitaph = '';
   if (typeof window !== 'undefined' && window.localStorage && petName) {
     try {
-      localSavedEpitaph = window.localStorage.getItem(`mc_epitaph_${String(petName).trim().toLowerCase()}`) || '';
+      // Prefer the per-memorial backup (keyed by metadata tx id). The legacy name-keyed backup is
+      // only trusted for the owner's own memorials, so another memorial with the same pet name
+      // never shows a story written for a different pet on this device.
+      localSavedEpitaph =
+        (arweaveTxId ? window.localStorage.getItem(`mc_epitaph_tx_${arweaveTxId}`) : '') ||
+        (isOwner ? window.localStorage.getItem(`mc_epitaph_${String(petName).trim().toLowerCase()}`) : '') ||
+        '';
     } catch {
       localSavedEpitaph = '';
     }

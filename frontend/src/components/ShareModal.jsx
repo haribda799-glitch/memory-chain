@@ -1,5 +1,47 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
+import { useModalBehavior } from '../hooks/useModalBehavior';
+
+// Resolution of the hidden QR canvas used only for PNG export (print-quality plaques / tags).
+const EXPORT_QR_SIZE = 1024;
+
+/**
+ * Builds a clean canonical memorial link (`<origin><BASE_URL>#/memorial/<id>`) when the given URL points
+ * at a memorial route, dropping stray query params and fixing a missing deploy base path.
+ */
+function toCanonicalMemorialUrl(rawUrl) {
+  if (typeof window === 'undefined') return rawUrl;
+  const match = String(rawUrl || '').match(/#\/memorial\/([^/?#&]+)/);
+  if (!match) return rawUrl;
+  const base = import.meta.env.BASE_URL || '/';
+  return `${window.location.origin}${base}#/memorial/${match[1]}`;
+}
+
+/** Legacy clipboard fallback (non-secure contexts / old browsers). Returns true only if the copy succeeded. */
+function legacyCopy(text) {
+  if (typeof document === 'undefined') return false;
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.readOnly = true;
+  textArea.setAttribute('readonly', '');
+  textArea.style.position = 'fixed';
+  textArea.style.top = '-9999px';
+  textArea.style.left = '0';
+  textArea.style.opacity = '0';
+  document.body.appendChild(textArea);
+  let ok = false;
+  try {
+    textArea.focus();
+    textArea.select();
+    textArea.setSelectionRange(0, text.length); // iOS Safari ignores select() alone
+    ok = document.execCommand('copy') === true;
+  } catch {
+    ok = false;
+  } finally {
+    document.body.removeChild(textArea);
+  }
+  return ok;
+}
 
 export default function ShareModal({
   isOpen = false,
@@ -8,68 +50,125 @@ export default function ShareModal({
   memorialId = '',
   url = '',
 }) {
-  const [copied, setCopied] = useState(false);
+  // 'idle' | 'copied' | 'failed'
+  const [copyStatus, setCopyStatus] = useState('idle');
   const [isClosing, setIsClosing] = useState(false);
   const canvasRef = useRef(null);
+  const exportCanvasRef = useRef(null);
+  const linkInputRef = useRef(null);
+  const copyTimerRef = useRef(null);
+  const closeTimerRef = useRef(null);
+  const copied = copyStatus === 'copied';
 
-  const memorialUrl = url || (typeof window !== 'undefined' ? window.location.href : '');
+  const memorialUrl = useMemo(
+    () => toCanonicalMemorialUrl(url || (typeof window !== 'undefined' ? window.location.href : '')),
+    [url]
+  );
+
+  // Clear pending timers on unmount.
+  useEffect(() => () => {
+    clearTimeout(copyTimerRef.current);
+    clearTimeout(closeTimerRef.current);
+  }, []);
+
+  // Clear the "Copied!" reset timer when the modal is closed (also when the parent closes it directly).
+  useEffect(() => {
+    if (isOpen) return;
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = null;
+  }, [isOpen]);
 
   const handleClose = () => {
     if (isClosing) return;
     setIsClosing(true);
-    setTimeout(() => {
+    clearTimeout(copyTimerRef.current);
+    clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => {
       setIsClosing(false);
-      setCopied(false);
+      setCopyStatus('idle');
       onClose();
     }, 250);
   };
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        handleClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
+  // Body scroll lock + Escape (always calls the latest handleClose).
+  useModalBehavior(isOpen, handleClose);
 
   const handleCopy = async () => {
-    try {
-      if (navigator?.clipboard?.writeText) {
+    let ok = false;
+    const canUseClipboardApi =
+      typeof navigator !== 'undefined' &&
+      Boolean(navigator.clipboard?.writeText) &&
+      typeof window !== 'undefined' &&
+      window.isSecureContext;
+
+    if (canUseClipboardApi) {
+      try {
         await navigator.clipboard.writeText(memorialUrl);
-      } else {
-        const textArea = document.createElement('textarea');
-        textArea.value = memorialUrl;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
+        ok = true;
+      } catch (err) {
+        console.error('Failed to copy link:', err);
+        ok = legacyCopy(memorialUrl);
       }
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch (err) {
-      console.error('Failed to copy link:', err);
+    } else {
+      ok = legacyCopy(memorialUrl);
     }
+
+    if (!ok) {
+      // Help the user copy manually: select the visible link field.
+      linkInputRef.current?.focus();
+      linkInputRef.current?.select();
+    }
+
+    setCopyStatus(ok ? 'copied' : 'failed');
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopyStatus('idle'), ok ? 2500 : 5000);
   };
 
-  const handleDownloadQR = () => {
-    const canvas = canvasRef.current || document.getElementById('memorial-qr-canvas');
+  const handleDownloadQR = async () => {
+    // Prefer the hidden high-resolution export canvas; fall back to the visible one.
+    const canvas = exportCanvasRef.current || canvasRef.current || document.getElementById('memorial-qr-canvas');
     if (!canvas) return;
 
-    // Create high-res PNG for printing
-    const pngUrl = canvas.toDataURL('image/png');
-    const downloadLink = document.createElement('a');
-    downloadLink.href = pngUrl;
     const safeName = (petName || `memorial_${memorialId || 'tribute'}`)
       .toLowerCase()
       .trim()
       .replace(/[^a-z0-9]/g, '_');
-    downloadLink.download = `${safeName}_qr_code.png`;
+    const fileName = `${safeName}_qr_code.png`;
+
+    // Create high-res PNG for printing
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      console.error('Failed to export QR code image.');
+      return;
+    }
+
+    // Mobile (iOS / Android): share the file so it can be saved to Photos / Files.
+    const isTouchDevice = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
+    if (isTouchDevice && typeof navigator !== 'undefined' && navigator.share && typeof File !== 'undefined') {
+      try {
+        const file = new File([blob], fileName, { type: 'image/png' });
+        if (navigator.canShare?.({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: `${petName ? `${petName} — ` : ''}Memorial QR Code`,
+          });
+          return;
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        console.error('QR file share failed, falling back to download:', err);
+      }
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    const downloadLink = document.createElement('a');
+    downloadLink.href = objectUrl;
+    downloadLink.download = fileName;
     document.body.appendChild(downloadLink);
     downloadLink.click();
     document.body.removeChild(downloadLink);
+    // Revoke on the next tick so the browser has started the download.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   };
 
   const canNativeShare = typeof navigator !== 'undefined' && Boolean(navigator.share);
@@ -92,7 +191,7 @@ export default function ShareModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[60] flex justify-center overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
       onClick={handleClose}
       role="dialog"
       aria-modal="true"
@@ -100,7 +199,7 @@ export default function ShareModal({
     >
       {/* Backdrop */}
       <div
-        className={`absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-300 ${
+        className={`fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-300 ${
           isClosing ? 'opacity-0' : 'opacity-100'
         }`}
       />
@@ -108,7 +207,7 @@ export default function ShareModal({
       {/* Modal Card */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`relative w-full max-w-md bg-[#fdfcfa] rounded-[24px] border border-[#d8c2ba]/50 shadow-2xl overflow-hidden transition-all duration-300 ${
+        className={`relative my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain bg-[#fdfcfa] rounded-[24px] border border-[#d8c2ba]/50 shadow-2xl transition-all duration-300 ${
           isClosing ? 'opacity-0 scale-95' : 'opacity-100 scale-100'
         }`}
       >
@@ -118,7 +217,7 @@ export default function ShareModal({
             type="button"
             onClick={handleClose}
             aria-label="Close"
-            className="absolute top-4 right-4 w-8 h-8 rounded-full bg-[#f5f3f0] flex items-center justify-center hover:bg-[#e8e5e0] transition-colors cursor-pointer text-[#5A5047]"
+            className="absolute top-3 right-3 w-10 h-10 rounded-full bg-[#f5f3f0] flex items-center justify-center hover:bg-[#e8e5e0] transition-colors cursor-pointer text-[#5A5047]"
           >
             <span className="material-symbols-outlined text-lg">close</span>
           </button>
@@ -155,6 +254,18 @@ export default function ShareModal({
                 fgColor="#1B1C1A"
                 className="w-44 h-44 md:w-52 md:h-52"
               />
+              {/* Hidden high-resolution copy used only for the PNG export */}
+              <QRCodeCanvas
+                ref={exportCanvasRef}
+                value={memorialUrl}
+                size={EXPORT_QR_SIZE}
+                level="H"
+                marginSize={2}
+                bgColor="#FFFFFF"
+                fgColor="#1B1C1A"
+                aria-hidden="true"
+                style={{ display: 'none' }}
+              />
             </div>
             <p className="text-[11px] text-[#7A6B60] text-center mt-2.5 max-w-xs leading-relaxed">
               Scan with any mobile camera to visit this tribute or print the QR code for a collar tag or keepsake.
@@ -178,6 +289,7 @@ export default function ShareModal({
             </label>
             <div className="flex items-center gap-2">
               <input
+                ref={linkInputRef}
                 type="text"
                 readOnly
                 value={memorialUrl}
@@ -199,6 +311,11 @@ export default function ShareModal({
                 <span>{copied ? 'Copied!' : 'Copy Link'}</span>
               </button>
             </div>
+            {copyStatus === 'failed' && (
+              <p role="alert" className="text-[11px] text-red-700 leading-relaxed">
+                Copy failed — please copy the link manually
+              </p>
+            )}
           </div>
 
           {/* Optional Native Share (Mobile) */}

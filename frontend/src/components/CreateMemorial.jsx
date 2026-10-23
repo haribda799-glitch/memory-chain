@@ -1,14 +1,15 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain } from 'wagmi';
+import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain, usePublicClient } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { formatEther, decodeEventLog } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress } from '../config/chains';
+import { getContractAddress, getExplorerUrl } from '../config/chains';
 import {
   uploadToArweave, uploadJsonToArweave, buildNftMetadata,
 } from '../utils/arweave';
+import { formatTxError, isUserRejection } from '../utils/txErrors';
 import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
@@ -28,6 +29,92 @@ const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once 
 
 const THUMBNAIL_MAX_DIM = 800;
 const THUMBNAIL_QUALITY = 0.85;
+
+/* ── On-chain / validation constants ───────────────────────── */
+const MAX_PET_NAME_BYTES = 128;                // Vyper String[128] limits UTF-8 BYTES, not characters
+const MIN_YEAR = 1900;
+const GAS_BUFFER_WEI = 50_000_000_000_000n;    // 0.00005 ETH fallback gas reserve when estimation is unavailable
+const ARWEAVE_URI_PLACEHOLDER = 'x'.repeat(43); // Same length as a real Arweave tx id (used for pre-upload gas estimation)
+const INSUFFICIENT_FUNDS_MESSAGE = 'Insufficient Base Sepolia ETH to cover the creation fee plus network fees. Top up your wallet from a faucet and try again.';
+const UNCONFIRMED_TX_MESSAGE = 'We could not confirm the transaction yet. It may still succeed — please check the block explorer before retrying.';
+const EXPLORER_BASE_URL = getExplorerUrl(baseSepolia.id);
+
+function getUtf8ByteLength(value) {
+  return new TextEncoder().encode(value || '').length;
+}
+
+/** Returns an English error message, or '' when the (trimmed) pet name can be stored on-chain. */
+function validatePetName(rawName) {
+  const name = (rawName || '').trim();
+  if (!name) return 'Pet name is required';
+  if (getUtf8ByteLength(name) > MAX_PET_NAME_BYTES) {
+    return `Name is too long for on-chain storage (max ${MAX_PET_NAME_BYTES} bytes). Please shorten it.`;
+  }
+  return '';
+}
+
+/** Today's date in the user's local timezone as YYYY-MM-DD (matches <input type="date"> values). */
+function getTodayISO() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Validates the Story step (dates + years). Returns an English error message, or '' when valid. */
+function validateStoryFields({ birthDate, memorialDate, birthYear, passingYear }) {
+  const todayISO = getTodayISO();
+  const currentYear = new Date().getFullYear();
+  const minDateISO = `${MIN_YEAR}-01-01`;
+
+  const checkDate = (value, label) => {
+    if (!value) return '';
+    if (!ISO_DATE_RE.test(value)) return `${label} is not a valid date.`;
+    if (value > todayISO) return `${label} cannot be in the future.`;
+    if (value < minDateISO) return `${label} cannot be earlier than ${MIN_YEAR}.`;
+    return '';
+  };
+  const parseYear = (value, label) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return { year: null, error: '' };
+    const rangeError = `${label} must be a whole number between ${MIN_YEAR} and ${currentYear}.`;
+    if (!/^\d{4}$/.test(raw)) return { year: null, error: rangeError };
+    const year = Number(raw);
+    if (year < MIN_YEAR || year > currentYear) return { year: null, error: rangeError };
+    return { year, error: '' };
+  };
+
+  const birthDateError = checkDate(birthDate, 'Birth date');
+  if (birthDateError) return birthDateError;
+  const memorialDateError = checkDate(memorialDate, 'Memorial date');
+  if (memorialDateError) return memorialDateError;
+  if (birthDate && memorialDate && birthDate > memorialDate) {
+    return 'Birth date must be on or before the memorial date.';
+  }
+
+  const birth = parseYear(birthYear, 'Birth year');
+  if (birth.error) return birth.error;
+  const passing = parseYear(passingYear, 'Passing year');
+  if (passing.error) return passing.error;
+
+  const birthDateYear = birthDate ? Number(birthDate.slice(0, 4)) : null;
+  const memorialDateYear = memorialDate ? Number(memorialDate.slice(0, 4)) : null;
+  if (birth.year !== null && birthDateYear !== null && birth.year !== birthDateYear) {
+    return `Birth year (${birth.year}) does not match the birth date (${birthDate}).`;
+  }
+  if (passing.year !== null && memorialDateYear !== null && passing.year !== memorialDateYear) {
+    return `Passing year (${passing.year}) does not match the memorial date (${memorialDate}).`;
+  }
+
+  const effectiveBirthYear = birthDateYear ?? birth.year;
+  const effectivePassingYear = memorialDateYear ?? passing.year;
+  if (effectiveBirthYear !== null && effectivePassingYear !== null && effectiveBirthYear > effectivePassingYear) {
+    return 'Birth year must be on or before the passing year.';
+  }
+  return '';
+}
 
 /**
  * Universal proportional thumbnail generator (Data URL max 800px).
@@ -291,6 +378,7 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 }
 
 /* ── Module-level cache for TFJS models to prevent repeated heavy re-downloads ── */
+let cachedTfReadyPromise = null;
 let cachedFaceModelPromise = null;
 let cachedObjectModelPromise = null;
 let isAiWarm = false;
@@ -299,10 +387,31 @@ function resetAiModeration() {
   // Do not call tf.disposeVariables() to avoid destroying BlazeFace / COCO-SSD model weights
 }
 
+/**
+ * Imports TF.js (registers the WebGL / CPU backends) and waits for a backend to be ready.
+ * Must run before any model is loaded. A failed attempt clears the cache so the next call retries.
+ */
+async function ensureTfReady() {
+  if (!cachedTfReadyPromise) {
+    cachedTfReadyPromise = (async () => {
+      try {
+        const tf = await import('@tensorflow/tfjs');
+        await tf.ready();
+        return tf;
+      } catch (err) {
+        cachedTfReadyPromise = null;
+        throw err;
+      }
+    })();
+  }
+  return cachedTfReadyPromise;
+}
+
 async function getFaceModel() {
   if (!cachedFaceModelPromise) {
     cachedFaceModelPromise = (async () => {
       try {
+        await ensureTfReady();
         const blazeface = await import('@tensorflow-models/blazeface');
         return await blazeface.load();
       } catch (err) {
@@ -318,6 +427,7 @@ async function getObjectModel() {
   if (!cachedObjectModelPromise) {
     cachedObjectModelPromise = (async () => {
       try {
+        await ensureTfReady();
         const cocoSsd = await import('@tensorflow-models/coco-ssd');
         return await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       } catch (err) {
@@ -331,6 +441,7 @@ async function getObjectModel() {
 
 async function preloadAiModels() {
   try {
+    await ensureTfReady();
     await Promise.all([getFaceModel(), getObjectModel()]);
     isAiWarm = true;
   } catch (e) {
@@ -339,18 +450,19 @@ async function preloadAiModels() {
 }
 
 export default function CreateMemorial() {
-  const { ready, authenticated, user } = usePrivy();
+  const { ready, authenticated } = usePrivy();
   const { wallets } = useWallets();
   const chainId = useChainId();
   const navigate = useNavigate();
   const contractAddress = getContractAddress(chainId);
   const { switchChainAsync } = useSwitchChain();
+  const publicClient = usePublicClient({ chainId: baseSepolia.id });
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  // Fallback to the first available wallet if not using embedded
-  const userAddress = embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
   const { address: wagmiAddress, connector, chain } = useAccount();
-  const activeUserAddress = wagmiAddress || userAddress;
+  // Single source of truth for the signer: the wagmi-connected account (it belongs to `connector`).
+  // The Privy embedded address is only a display / balance fallback while wagmi has no account yet.
+  const activeUserAddress = wagmiAddress || embeddedWallet?.address;
   const { data: balance } = useBalance({ address: activeUserAddress });
   const isConnected = ready && authenticated;
 
@@ -380,8 +492,14 @@ export default function CreateMemorial() {
   const [isMinting, setIsMinting] = useState(false);
   const [isInitiating, setIsInitiating] = useState(false); // Immediate sync lock on click to prevent multi-mint
   const [txHash, setTxHash] = useState(null);
+  const [unconfirmedTxHash, setUnconfirmedTxHash] = useState(null); // Receipt could not be confirmed (timeout / RPC)
   const [mintedIsPublic, setMintedIsPublic] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+
+  // Synchronous submit lock (state updates are async, so double taps can slip past isInitiating)
+  const submitLockRef = useRef(false);
+  // Pending tx hash the user explicitly chose to override after it could not be confirmed
+  const acknowledgedPendingTxRef = useRef(null);
 
   // Photo processing progress state (instant visual feedback on file selection)
   const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
@@ -442,15 +560,26 @@ export default function CreateMemorial() {
   }, []);
 
   const { writeContractAsync } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess, isError: isReceiptError, data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
+  const {
+    isLoading: isConfirming,
+    isSuccess,
+    isError: isReceiptError,
+    error: receiptError,
+    data: receipt,
+    refetch: refetchReceipt,
+  } = useWaitForTransactionReceipt({ hash: txHash, chainId: baseSepolia.id });
 
   // Decode created memorial tokenId from transaction logs
   const createdTokenId = useMemo(() => {
     if (!receipt?.logs) return null;
+    const expectedAddress = String(contractAddress || '').toLowerCase();
     for (const log of receipt.logs) {
+      // Only our contract's logs can carry the MemorialCreated event we care about
+      if (!expectedAddress || String(log.address || '').toLowerCase() !== expectedAddress) continue;
       try {
         const decoded = decodeEventLog({
           abi: CONTRACT_ABI,
+          eventName: 'MemorialCreated',
           data: log.data,
           topics: log.topics,
         });
@@ -462,21 +591,79 @@ export default function CreateMemorial() {
       }
     }
     return null;
-  }, [receipt]);
+  }, [receipt, contractAddress]);
 
-  // Handle transaction receipt error
+  // Draft recovery state
+  const [draft, setDraft] = useState(null);
+
+  // Persist (or clear, when `next` is null) the local draft and mirror it into state
+  const persistDraft = useCallback((next) => {
+    try {
+      if (next) localStorage.setItem('draft_memorial', JSON.stringify(next));
+      else localStorage.removeItem('draft_memorial');
+    } catch (err) {
+      console.warn('[Draft] Could not persist draft:', err);
+    }
+    setDraft(next);
+  }, []);
+
+  // Handle transaction receipt error: distinguish a real on-chain revert from a timeout / RPC failure
   useEffect(() => {
-    if (isReceiptError) {
-      setError('Transaction reverted on-chain. Please verify and try again.');
+    if (!isReceiptError || !txHash) return;
+    let cancelled = false;
+    const failedHash = txHash;
+
+    (async () => {
+      let status = null; // 'reverted' | 'success' | null (unknown)
+      try {
+        const directReceipt = await publicClient?.getTransactionReceipt({ hash: failedHash });
+        status = directReceipt?.status ?? null;
+      } catch {
+        // Receipt not found yet or RPC failure — status stays unknown
+      }
+      if (cancelled) return;
+
+      if (status === 'success') {
+        // The tx actually confirmed; the hook error was transient — re-query so the success flow runs.
+        refetchReceipt();
+        return;
+      }
+
+      const receiptErrorText = `${receiptError?.shortMessage || ''} ${receiptError?.message || ''}`;
+      const isRevert = status === 'reverted' || (status === null && /reverted/i.test(receiptErrorText));
+
+      if (isRevert) {
+        let reason = formatTxError(receiptError, 'The contract rejected the transaction.');
+        if (/^Network error/i.test(reason)) reason = 'The contract rejected the transaction.';
+        setError(`Transaction reverted on-chain: ${reason} No memorial was created and the creation fee was not charged (only network gas was spent).`);
+        setUnconfirmedTxHash(null);
+        // The tx definitively failed, so the saved draft can be resumed safely without double-paying
+        try {
+          const saved = JSON.parse(localStorage.getItem('draft_memorial') || 'null');
+          if (saved && saved.pendingTxHash === failedHash) {
+            const nextDraft = { ...saved };
+            delete nextDraft.pendingTxHash;
+            persistDraft(nextDraft);
+          }
+        } catch {
+          // ignore malformed draft
+        }
+      } else {
+        // Timeout / RPC error: the tx may still be mined. Keep the draft (with its pending hash) and do NOT
+        // encourage an immediate retry that could pay the creation fee twice.
+        setError(UNCONFIRMED_TX_MESSAGE);
+        setUnconfirmedTxHash(failedHash);
+      }
       setTxHash(null);
       setIsMinting(false);
       setIsInitiating(false);
       setFlowStep(0);
-    }
-  }, [isReceiptError]);
+    })();
 
-  // Draft recovery state
-  const [draft, setDraft] = useState(null);
+    return () => {
+      cancelled = true;
+    };
+  }, [isReceiptError, txHash, receiptError, publicClient, refetchReceipt, persistDraft]);
 
   // Complete reset of form state
   const resetFormState = useCallback(() => {
@@ -509,6 +696,8 @@ export default function CreateMemorial() {
     setIsMinting(false);
     setIsInitiating(false);
     setTxHash(null);
+    setUnconfirmedTxHash(null);
+    acknowledgedPendingTxRef.current = null;
     setMintedIsPublic(false);
     setShowShareModal(false);
     resetAiModeration();
@@ -533,8 +722,9 @@ export default function CreateMemorial() {
   // Clear draft & photo states on successful transaction confirmation
   useEffect(() => {
     if (isSuccess) {
-      localStorage.removeItem('draft_memorial');
-      setDraft(null);
+      persistDraft(null);
+      setUnconfirmedTxHash(null);
+      acknowledgedPendingTxRef.current = null;
       analysisRunIdRef.current += 1;
       if (fileInputRef.current) fileInputRef.current.value = '';
       setPhoto(null);
@@ -549,7 +739,7 @@ export default function CreateMemorial() {
       setError(null);
       resetAiModeration();
     }
-  }, [isSuccess]);
+  }, [isSuccess, persistDraft]);
 
   // Read creation_fee from contract
   const { data: creationFeeRaw, refetch: refetchCreationFee } = useReadContract({
@@ -557,7 +747,10 @@ export default function CreateMemorial() {
     abi: CONTRACT_ABI,
     functionName: 'creation_fee',
   });
-  const creationFee = creationFeeRaw ? BigInt(creationFeeRaw) : 2_000_000_000_000_000n; // fallback 0.002 ETH
+  // Never fall back to a guessed fee: the contract requires msg.value == creation_fee exactly.
+  const creationFee = typeof creationFeeRaw === 'bigint' ? creationFeeRaw : null;
+  const isFeeKnown = creationFee !== null;
+  const creationFeeLabel = isFeeKnown ? formatEther(creationFee) : '…';
 
   // Read creation_paused from contract (on-chain invariant guard)
   const { data: creationPaused } = useReadContract({
@@ -567,12 +760,14 @@ export default function CreateMemorial() {
   });
   const isCreationPaused = Boolean(creationPaused);
 
-  const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < creationFee);
+  const isInsufficientFunds = Boolean(
+    isFeeKnown && balance?.value !== undefined && balance.value < creationFee + GAS_BUFFER_WEI
+  );
 
   /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) ── */
   const runAiCheck = useCallback(async (imageUrl) => {
-    // 1. Ensure TFJS and models are loaded
-    await import('@tensorflow/tfjs');
+    // 1. Ensure TFJS backend is ready and models are loaded
+    await ensureTfReady();
     const [faceModel, objectModel] = await Promise.all([
       getFaceModel(),
       getObjectModel(),
@@ -702,7 +897,7 @@ export default function CreateMemorial() {
       console.warn('[CreateMemorial] Thumbnail error:', e);
     }
     if (!isCurrent()) {
-      setIsProcessingPhoto(false);
+      // A newer selection (or removal) owns the photo UI state now — leave it untouched
       return;
     }
 
@@ -771,48 +966,133 @@ export default function CreateMemorial() {
     if (file) handlePhotoSelect(file);
   }, [handlePhotoSelect]);
 
-  /* ── Submit flow: Arweave upload → mint ──────────────── */
-  const handleSubmit = async (e) => {
-    if (e) e.preventDefault();
-    if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
-    setIsInitiating(true);
+  /* ── Shared minting pre-flight helpers ─────────────────── */
 
-    if (!isConnected) { setIsInitiating(false); setError('Please connect your wallet first'); return; }
-    if (!connector) {
-      setIsInitiating(false);
-      console.error("Wallet connector is missing or Privy was blocked.");
-      setError("Wallet connection failed. Please disable your adblocker or reconnect your wallet.");
-      return;
+  // Latest on-chain creation fee as a bigint, or null when it cannot be read (never guess the fee).
+  const fetchLatestFee = async () => {
+    try {
+      const result = await refetchCreationFee();
+      if (result?.error || result?.isError) return null;
+      return typeof result?.data === 'bigint' ? result.data : null;
+    } catch (fErr) {
+      console.warn('[CreateMemorial] Failed to refetch latest fee:', fErr);
+      return null;
     }
-    if (!petName.trim()) { setIsInitiating(false); setError('Pet name is required'); return; }
-    if (detectedPerson && !humanConsentGiven) {
-      setIsInitiating(false);
-      setError('Please confirm consent for the person detected in the photo');
-      return;
+  };
+
+  // Balance check that also reserves network gas. Returns an English error message, or '' when funds look sufficient.
+  const checkFundsForMint = async ({ account, args, fee }) => {
+    if (!publicClient || !account) return '';
+    let gasCost = GAS_BUFFER_WEI;
+    try {
+      const [gas, fees] = await Promise.all([
+        publicClient.estimateContractGas({
+          address: contractAddress,
+          abi: CONTRACT_ABI,
+          functionName: 'create_memorial',
+          args,
+          value: fee,
+          account,
+        }),
+        publicClient.estimateFeesPerGas(),
+      ]);
+      const perGas = fees?.maxFeePerGas ?? fees?.gasPrice;
+      if (gas && perGas) gasCost = (gas * perGas * 12n) / 10n; // +20% safety margin
+    } catch (estErr) {
+      const friendly = formatTxError(estErr, '');
+      if (/^Insufficient/i.test(friendly)) return INSUFFICIENT_FUNDS_MESSAGE;
+      // A contract revert during estimation means the real tx would revert too — surface it before anything is paid
+      let cause = estErr;
+      for (let i = 0; i < 8 && cause; i += 1) {
+        if (cause.name === 'ContractFunctionRevertedError') {
+          return friendly || 'The contract would reject this transaction. Please try again later.';
+        }
+        cause = cause.cause;
+      }
+      console.warn('[CreateMemorial] Gas estimation unavailable, using fixed buffer:', estErr?.shortMessage || estErr);
     }
-    if (isCreationPaused) {
-      setIsInitiating(false);
-      setError('Memorial creation is temporarily paused by the protocol. Please try again later.');
-      return;
+    try {
+      const latestBalance = await publicClient.getBalance({ address: account });
+      if (latestBalance < fee + gasCost) return INSUFFICIENT_FUNDS_MESSAGE;
+    } catch (balErr) {
+      console.warn('[CreateMemorial] Balance refresh failed, using cached balance:', balErr?.shortMessage || balErr);
+      if (balance?.value !== undefined && balance.value < fee + gasCost) return INSUFFICIENT_FUNDS_MESSAGE;
     }
-    if (isInsufficientFunds) {
-      setIsInitiating(false);
-      setError('Insufficient ETH Balance to mint memorial.');
-      return;
+    return '';
+  };
+
+  // Wallet / network readiness. Returns an English error message, or '' when ready to send.
+  const ensureWalletReady = async () => {
+    if (!isConnected) return 'Please connect your wallet first';
+    if (!connector || !wagmiAddress) {
+      console.error('Wallet connector is missing or Privy was blocked.');
+      return 'Wallet connection failed. Please disable your adblocker or reconnect your wallet.';
     }
+    if (isCreationPaused) return 'Memorial creation is temporarily paused by the protocol. Please try again later.';
     if (chain?.id !== baseSepolia.id) {
       try {
         await switchChainAsync({ chainId: baseSepolia.id });
       } catch (switchErr) {
-        setIsInitiating(false);
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
-        setError('Please switch your wallet network to Base Sepolia to continue.');
-        return;
+        return formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia to continue.');
       }
     }
-    setError('');
+    return '';
+  };
 
+  // The tx account is always the wagmi-connected address, which belongs to `connector`.
+  const sendCreateMemorialTx = ({ name, metadataTxId, isPublicFlag, fee }) => writeContractAsync({
+    address: contractAddress,
+    abi: CONTRACT_ABI,
+    functionName: 'create_memorial',
+    args: [name, metadataTxId, isPublicFlag],
+    value: fee,
+    account: wagmiAddress,
+    connector,
+    chainId: baseSepolia.id,
+  });
+
+  const FEE_UNAVAILABLE_MESSAGE = 'Could not load the current creation fee from the contract. Please check your connection and try again.';
+
+  /* ── Submit flow: Arweave upload → mint ──────────────── */
+  const handleSubmit = async (e) => {
+    if (e) e.preventDefault();
+    if (submitLockRef.current) return;
+    if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
+    submitLockRef.current = true;
+    setIsInitiating(true);
+    setError('');
+    setUnconfirmedTxHash(null);
+
+    let phase = 'preflight'; // preflight | upload | mint
+    let sentHash = null;
     try {
+      const name = petName.trim();
+      const nameError = validatePetName(name);
+      if (nameError) { setStep(0); setError(nameError); return; }
+      const storyError = validateStoryFields({ birthDate, memorialDate, birthYear, passingYear });
+      if (storyError) { setStep(1); setError(storyError); return; }
+      if (detectedPerson && !humanConsentGiven) {
+        setError('Please confirm consent for the person detected in the photo');
+        return;
+      }
+      if (isInsufficientFunds) { setError(INSUFFICIENT_FUNDS_MESSAGE); return; }
+
+      const walletError = await ensureWalletReady();
+      if (walletError) { setError(walletError); return; }
+      const account = wagmiAddress;
+
+      // Check fee + balance (incl. gas) BEFORE paid uploads so nothing is uploaded for a mint that cannot succeed
+      const preflightFee = await fetchLatestFee();
+      if (preflightFee === null) { setError(FEE_UNAVAILABLE_MESSAGE); return; }
+      const preflightFundsError = await checkFundsForMint({
+        account,
+        args: [name, ARWEAVE_URI_PLACEHOLDER, isPublic],
+        fee: preflightFee,
+      });
+      if (preflightFundsError) { setError(preflightFundsError); return; }
+
+      phase = 'upload';
       setFlowStep(1);
       let imageTxId = '';
       if (photo) {
@@ -822,159 +1102,167 @@ export default function CreateMemorial() {
         } catch (compErr) {
           console.warn('[CreateMemorial] Arweave image preparation note:', compErr);
         }
-        imageTxId = await uploadToArweave(photoToUpload, [{ name: 'Pet-Name', value: petName }]);
+        imageTxId = await uploadToArweave(photoToUpload, [{ name: 'Pet-Name', value: name }]);
       }
 
       setFlowStep(2);
-      const metadata = buildNftMetadata({ petName, description, birthDate, memorialDate, birthYear, passingYear, species, breed, imageTxId, ownerAddress: userAddress });
+      const metadata = buildNftMetadata({ petName: name, description, birthDate, memorialDate, birthYear, passingYear, species, breed, imageTxId, ownerAddress: account });
       const metadataTxId = await uploadJsonToArweave(metadata);
 
       // Save draft immediately after Arweave metadata upload succeeds
       const draftData = {
         metadataTxId,
-        petName,
+        petName: name,
         isPublic,
         createdAt: Date.now(),
       };
-      localStorage.setItem('draft_memorial', JSON.stringify(draftData));
-      setDraft(draftData);
+      persistDraft(draftData);
 
+      phase = 'mint';
       setFlowStep(3);
       setIsMinting(true);
       setMintedIsPublic(Boolean(isPublic));
-      console.log('[CreateMemorial] Triggering writeContractAsync...');
 
       // Fetch latest creation fee dynamically to guarantee sending the exact amount required by the contract
-      let currentFee = creationFee;
-      try {
-        const { data: latestFee } = await refetchCreationFee();
-        if (latestFee) currentFee = BigInt(latestFee);
-      } catch (fErr) {
-        console.warn('[CreateMemorial] Failed to refetch latest fee, using cached:', fErr);
+      const currentFee = await fetchLatestFee();
+      if (currentFee === null) {
+        setError(`${FEE_UNAVAILABLE_MESSAGE} Your upload is saved — use "Resume Minting" when you are ready.`);
+        return;
       }
 
-      const hash = await writeContractAsync({
-        address: contractAddress,
-        abi: CONTRACT_ABI,
-        functionName: 'create_memorial',
-        args: [petName, metadataTxId, isPublic],
-        value: currentFee,
-        account: userAddress,
-        connector,
-        chainId: baseSepolia.id,
-      });
+      console.log('[CreateMemorial] Triggering writeContractAsync...');
+      const hash = await sendCreateMemorialTx({ name, metadataTxId, isPublicFlag: isPublic, fee: currentFee });
+      sentHash = hash;
 
       console.log('[CreateMemorial] Success Tx Hash:', hash);
-      // Immediately clear local draft upon receiving tx hash to prevent duplicate submissions
-      localStorage.removeItem('draft_memorial');
-      setDraft(null);
+      // Keep the draft until the receipt succeeds; remember the hash so a reload / resume never blindly pays twice
+      persistDraft({ ...draftData, pendingTxHash: hash });
       setTxHash(hash);
-      setIsMinting(false);
-      setIsInitiating(false);
     } catch (err) {
       console.error('[CreateMemorial] Minting error:', err);
-      let errMsg = err.shortMessage || err.message || 'Something went wrong';
-      if (errMsg.includes('Exact creation fee required')) {
-        errMsg = 'The exact creation fee is required by the contract. The fee has been refreshed, please try again.';
-        refetchCreationFee();
+      if (phase === 'upload') {
+        const detail = String(err?.message || '').slice(0, 160);
+        setError(`Upload to Arweave failed${detail ? `: ${detail}` : ''}. No payment was made — please try again.`);
+      } else if (isUserRejection(err)) {
+        setError('Transaction cancelled in your wallet.');
+      } else {
+        const message = formatTxError(err, 'Minting failed. Please try again.');
+        if (/creation fee changed/i.test(message)) refetchCreationFee();
+        setError(message);
       }
-      setError(`Minting failed: ${errMsg}`);
-      alert(`Minting failed: ${errMsg}`);
+    } finally {
+      submitLockRef.current = false;
       setIsMinting(false);
       setIsInitiating(false);
-      setFlowStep(0);
+      if (!sentHash) setFlowStep(0);
     }
   };
 
   /* ── Resume draft flow ─────────────────────────────────── */
   const handleResumeDraft = async (targetDraft = draft) => {
     if (!targetDraft || !targetDraft.metadataTxId) return;
+    if (submitLockRef.current) return;
     if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
+    submitLockRef.current = true;
     setIsInitiating(true);
-
-    if (!isConnected) { setIsInitiating(false); setError('Please connect your wallet first'); return; }
-    if (!connector) {
-      setIsInitiating(false);
-      setError("Wallet connection failed. Please disable your adblocker or reconnect your wallet.");
-      return;
-    }
-    if (isCreationPaused) {
-      setIsInitiating(false);
-      setError('Memorial creation is temporarily paused by the protocol. Please try again later.');
-      return;
-    }
-    if (isInsufficientFunds) {
-      setIsInitiating(false);
-      setError('Insufficient ETH Balance to mint memorial.');
-      return;
-    }
-    if (chain?.id !== baseSepolia.id) {
-      try {
-        await switchChainAsync({ chainId: baseSepolia.id });
-      } catch (switchErr) {
-        setIsInitiating(false);
-        console.error('[CreateMemorial] Failed to switch network:', switchErr);
-        setError('Please switch your wallet network to Base Sepolia to continue.');
-        return;
-      }
-    }
     setError('');
 
+    let sentHash = null;
     try {
+      const name = String(targetDraft.petName || '').trim();
+      const nameError = validatePetName(name);
+      if (nameError) {
+        setError(`${nameError.replace(/\.?$/, '.')} Please discard this draft and create the memorial again.`);
+        return;
+      }
+      if (isInsufficientFunds) { setError(INSUFFICIENT_FUNDS_MESSAGE); return; }
+
+      const walletError = await ensureWalletReady();
+      if (walletError) { setError(walletError); return; }
+      const account = wagmiAddress;
+      const draftPublic = Boolean(targetDraft.isPublic ?? false);
+
+      // A transaction for this draft was already broadcast: check its outcome before paying again
+      const pendingHash = targetDraft.pendingTxHash;
+      if (pendingHash && acknowledgedPendingTxRef.current !== pendingHash) {
+        let pendingStatus = null;
+        try {
+          const previousReceipt = await publicClient?.getTransactionReceipt({ hash: pendingHash });
+          pendingStatus = previousReceipt?.status ?? null;
+        } catch {
+          pendingStatus = null; // not mined yet, dropped, or RPC failure
+        }
+        if (pendingStatus === 'success') {
+          // Already minted — run the normal confirmation flow instead of paying twice
+          setPetName(name);
+          setIsPublic(draftPublic);
+          setMintedIsPublic(draftPublic);
+          setFlowStep(3);
+          sentHash = pendingHash;
+          setTxHash(pendingHash);
+          return;
+        }
+        if (pendingStatus !== 'reverted') {
+          acknowledgedPendingTxRef.current = pendingHash;
+          setUnconfirmedTxHash(pendingHash);
+          setError('Your previous transaction for this memorial has not been confirmed yet. Please check the block explorer first. If it failed or was dropped, click "Resume Minting" again to send a new transaction.');
+          return;
+        }
+        // Reverted: the fee was not charged, so a fresh transaction is safe
+      }
+      setUnconfirmedTxHash(null);
+
       setFlowStep(3);
       setIsMinting(true);
-      if (targetDraft.petName) setPetName(targetDraft.petName);
-      const draftPublic = Boolean(targetDraft.isPublic ?? false);
+      setPetName(name);
       setIsPublic(draftPublic);
       setMintedIsPublic(draftPublic);
 
       // Fetch latest creation fee dynamically to guarantee sending the exact amount required by the contract
-      let currentFee = creationFee;
-      try {
-        const { data: latestFee } = await refetchCreationFee();
-        if (latestFee) currentFee = BigInt(latestFee);
-      } catch (fErr) {
-        console.warn('[CreateMemorial] Failed to refetch latest fee, using cached:', fErr);
-      }
-
-      const hash = await writeContractAsync({
-        address: contractAddress,
-        abi: CONTRACT_ABI,
-        functionName: 'create_memorial',
-        args: [targetDraft.petName, targetDraft.metadataTxId, draftPublic],
-        value: currentFee,
-        account: userAddress,
-        connector,
-        chainId: baseSepolia.id,
+      const currentFee = await fetchLatestFee();
+      if (currentFee === null) { setError(FEE_UNAVAILABLE_MESSAGE); return; }
+      const fundsError = await checkFundsForMint({
+        account,
+        args: [name, targetDraft.metadataTxId, draftPublic],
+        fee: currentFee,
       });
+      if (fundsError) { setError(fundsError); return; }
+
+      const hash = await sendCreateMemorialTx({ name, metadataTxId: targetDraft.metadataTxId, isPublicFlag: draftPublic, fee: currentFee });
+      sentHash = hash;
 
       console.log('[CreateMemorial] Resumed Tx Hash:', hash);
-      // Immediately clear local draft upon receiving tx hash to prevent duplicate submissions
-      localStorage.removeItem('draft_memorial');
-      setDraft(null);
+      // Keep the draft until the receipt succeeds; remember the hash so a reload / resume never blindly pays twice
+      acknowledgedPendingTxRef.current = null;
+      persistDraft({ ...targetDraft, petName: name, pendingTxHash: hash });
       setTxHash(hash);
-      setIsMinting(false);
-      setIsInitiating(false);
     } catch (err) {
       console.error('[CreateMemorial] Resume minting error:', err);
-      let errMsg = err.shortMessage || err.message || 'Something went wrong';
-      if (errMsg.includes('Exact creation fee required')) {
-        errMsg = 'The exact creation fee is required by the contract. The fee has been refreshed, please try again.';
-        refetchCreationFee();
+      if (isUserRejection(err)) {
+        setError('Transaction cancelled in your wallet.');
+      } else {
+        const message = formatTxError(err, 'Minting failed. Please try again.');
+        if (/creation fee changed/i.test(message)) refetchCreationFee();
+        setError(message);
       }
-      setError(`Minting failed: ${errMsg}`);
+    } finally {
+      submitLockRef.current = false;
       setIsMinting(false);
       setIsInitiating(false);
-      setFlowStep(0);
+      if (!sentHash) setFlowStep(0);
     }
   };
 
   const handleDiscardDraft = () => {
-    localStorage.removeItem('draft_memorial');
-    setDraft(null);
+    acknowledgedPendingTxRef.current = null;
+    persistDraft(null);
   };
 
   const isEOA = connector?.name && !connector.name.toLowerCase().includes('privy');
+
+  const petNameBytes = getUtf8ByteLength(petName.trim());
+  const todayISO = getTodayISO();
+  const currentYear = new Date().getFullYear();
 
   const isSubmitting = isInitiating || flowStep > 0 || isMinting || isConfirming || (Boolean(txHash) && !isSuccess);
 
@@ -983,7 +1271,7 @@ export default function CreateMemorial() {
     const isPublicTribute = Boolean(mintedIsPublic);
     const memorialTargetUrl = createdTokenId ? `/memorial/${createdTokenId}` : '/my';
     const memorialShareUrl = createdTokenId
-      ? `${typeof window !== 'undefined' ? window.location.origin : ''}/#/memorial/${createdTokenId}`
+      ? `${typeof window !== 'undefined' ? window.location.origin : ''}${import.meta.env.BASE_URL}#/memorial/${createdTokenId}`
       : (typeof window !== 'undefined' ? window.location.href : '');
 
     return (
@@ -1144,6 +1432,20 @@ export default function CreateMemorial() {
                 <p className="text-xs text-[#53433e] mt-0.5 leading-relaxed">
                   Arweave preservation record for <span className="font-semibold italic">{draft.petName}</span> is saved on your device. Skip media re-upload and complete the on-chain minting.
                 </p>
+                {draft.pendingTxHash && (
+                  <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                    A minting transaction was already sent for this draft (
+                    <a
+                      href={`${EXPLORER_BASE_URL}/tx/${draft.pendingTxHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline font-medium"
+                    >
+                      view on explorer
+                    </a>
+                    ). Resuming checks its status first so you are not charged twice.
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
@@ -1158,7 +1460,7 @@ export default function CreateMemorial() {
               <button
                 type="button"
                 onClick={() => handleResumeDraft(draft)}
-                disabled={isSubmitting || isInsufficientFunds || isCreationPaused}
+                disabled={isSubmitting || isInsufficientFunds || isCreationPaused || !isFeeKnown}
                 className="px-4 py-2 rounded-xl text-xs font-semibold uppercase tracking-wider bg-[#8a4f36] text-white hover:opacity-90 transition-opacity shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
@@ -1171,11 +1473,13 @@ export default function CreateMemorial() {
                     <span>
                       {isCreationPaused
                         ? 'Creation Paused'
-                        : isInsufficientFunds
-                          ? `Insufficient ETH (${formatEther(creationFee)} ETH required)`
-                          : 'Resume Minting'}
+                        : !isFeeKnown
+                          ? 'Loading fee…'
+                          : isInsufficientFunds
+                            ? `Insufficient ETH (${creationFeeLabel} ETH + gas required)`
+                            : 'Resume Minting'}
                     </span>
-                    {!isInsufficientFunds && !isCreationPaused && (
+                    {!isInsufficientFunds && !isCreationPaused && isFeeKnown && (
                       <span className="material-symbols-outlined text-sm">arrow_forward</span>
                     )}
                   </>
@@ -1215,6 +1519,16 @@ export default function CreateMemorial() {
         {error && (
           <div className="mb-6 bg-[#ffdad6] border border-[#ba1a1a]/20 rounded-xl px-4 py-3 text-sm text-[#93000a]">
             {error}
+            {unconfirmedTxHash && (
+              <a
+                href={`${EXPLORER_BASE_URL}/tx/${unconfirmedTxHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block mt-2 text-xs font-mono underline break-all"
+              >
+                {unconfirmedTxHash}
+              </a>
+            )}
           </div>
         )}
 
@@ -1393,6 +1707,11 @@ export default function CreateMemorial() {
                 value={petName} onChange={(e) => setPetName(e.target.value)}
                 placeholder="e.g. Luna" maxLength={128}
               />
+              {petNameBytes > MAX_PET_NAME_BYTES && (
+                <p className="text-xs text-[#93000a] mt-1">
+                  Name is too long for on-chain storage ({petNameBytes}/{MAX_PET_NAME_BYTES} bytes). Please shorten it.
+                </p>
+              )}
             </div>
 
             {/* Species + Breed */}
@@ -1418,19 +1737,19 @@ export default function CreateMemorial() {
             <div className="grid grid-cols-2 gap-6">
               <div>
                 <label className={labelBase}>Birth Date</label>
-                <input className={inputBase} type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
+                <input className={inputBase} type="date" min={`${MIN_YEAR}-01-01`} max={todayISO} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
               </div>
               <div>
                 <label className={labelBase}>Memorial Date</label>
-                <input className={inputBase} type="date" value={memorialDate} onChange={(e) => setMemorialDate(e.target.value)} />
+                <input className={inputBase} type="date" min={`${MIN_YEAR}-01-01`} max={todayISO} value={memorialDate} onChange={(e) => setMemorialDate(e.target.value)} />
               </div>
               <div>
                 <label className={labelBase}>Birth Year (if exact date unknown)</label>
-                <input className={inputBase} type="number" placeholder="e.g. 2012" value={birthYear} onChange={(e) => setBirthYear(e.target.value)} />
+                <input className={inputBase} type="number" min={MIN_YEAR} max={currentYear} step={1} placeholder="e.g. 2012" value={birthYear} onChange={(e) => setBirthYear(e.target.value)} />
               </div>
               <div>
                 <label className={labelBase}>Passing Year (if exact date unknown)</label>
-                <input className={inputBase} type="number" placeholder="e.g. 2024" value={passingYear} onChange={(e) => setPassingYear(e.target.value)} />
+                <input className={inputBase} type="number" min={MIN_YEAR} max={currentYear} step={1} placeholder="e.g. 2024" value={passingYear} onChange={(e) => setPassingYear(e.target.value)} />
               </div>
             </div>
             <div>
@@ -1468,7 +1787,7 @@ export default function CreateMemorial() {
                 )}
                 {description && <p className="italic leading-relaxed">"{description}"</p>}
                 <p><span className="font-semibold text-[#1b1c1a]">Visibility:</span> {isPublic ? 'Public Gallery' : 'Unlisted (Private)'}</p>
-                <p><span className="font-semibold text-[#1b1c1a]">Creation Fee:</span> {formatEther(creationFee)} ETH</p>
+                <p><span className="font-semibold text-[#1b1c1a]">Creation Fee:</span> {isFeeKnown ? `${creationFeeLabel} ETH` : 'Loading fee…'}</p>
               </div>
             </div>
 
@@ -1521,7 +1840,7 @@ export default function CreateMemorial() {
             <form onSubmit={handleSubmit}>
               <button
                 type="submit"
-                disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused}
+                disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused || !isFeeKnown}
                 className="w-full flex items-center justify-center gap-3 bg-[#d48c6f] text-white py-4 rounded-2xl text-sm font-semibold tracking-wider uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
@@ -1531,10 +1850,12 @@ export default function CreateMemorial() {
                   </>
                 ) : isCreationPaused ? (
                   <><span>Memorial Creation Paused</span></>
+                ) : !isFeeKnown ? (
+                  <><span>Loading fee…</span></>
                 ) : isInsufficientFunds ? (
-                  <><span>Insufficient ETH Balance ({formatEther(creationFee)} ETH required)</span></>
+                  <><span>Insufficient ETH Balance ({creationFeeLabel} ETH + gas required)</span></>
                 ) : (
-                  <><span>Preserve Forever ({formatEther(creationFee)} ETH)</span><span className="material-symbols-outlined text-base">arrow_forward</span></>
+                  <><span>Preserve Forever ({creationFeeLabel} ETH)</span><span className="material-symbols-outlined text-base">arrow_forward</span></>
                 )}
               </button>
             </form>
@@ -1556,14 +1877,20 @@ export default function CreateMemorial() {
                 type="button"
                 onClick={() => {
                   if (step === 0) {
-                    if (!petName.trim()) { setError('Pet name is required'); return; }
+                    const nameError = validatePetName(petName);
+                    if (nameError) { setError(nameError); return; }
                     // Image check/compression runs in the background and never gates Continue.
                     if (detectedPerson && !humanConsentGiven) {
                       setError('Please confirm consent for the detected person in the photo');
                       return;
                     }
                   }
+                  if (step === 1) {
+                    const storyError = validateStoryFields({ birthDate, memorialDate, birthYear, passingYear });
+                    if (storyError) { setError(storyError); return; }
+                  }
                   setError('');
+                  setUnconfirmedTxHash(null);
                   setStep(s => s + 1);
                 }}
                 disabled={step === 0 && detectedPerson && !humanConsentGiven}

@@ -1,9 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt, useChainId, useAccount, useReadContract, useSwitchChain, useEstimateFeesPerGas } from 'wagmi';
 import { baseSepolia } from 'viem/chains';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
+import { formatTxError } from '../utils/txErrors';
+import { useModalBehavior } from '../hooks/useModalBehavior';
+
+// Max time to wait for the report tx receipt before surfacing a "taking longer than expected" error.
+const RECEIPT_TIMEOUT_MS = 120_000;
 
 const REPORT_REASONS = [
   'Inappropriate or offensive content',
@@ -29,16 +34,20 @@ export default function ReportModal({
   const { wallets } = useWallets();
   const { user, login } = usePrivy();
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
+  // Single source of truth for the reporter address: prefer the wagmi account (the one that signs the tx),
+  // fall back to Privy only when wagmi has none. Used for every read and for the localStorage key.
   const activeAddress = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
 
   const [selectedReason, setSelectedReason] = useState(REPORT_REASONS[0]);
   const [error, setError] = useState('');
   const [isClosing, setIsClosing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
-  const { data: feeData } = useEstimateFeesPerGas();
+  const { data: feeData } = useEstimateFeesPerGas({ chainId: baseSepolia.id });
 
   // Read has_created_memorial for Sybil Guard check
-  const { data: hasCreatedMemorial } = useReadContract({
+  const { data: hasCreatedMemorial, isFetched: isSybilCheckFetched } = useReadContract({
     address: contractAddress,
     abi: CONTRACT_ABI,
     functionName: 'has_created_memorial',
@@ -76,18 +85,21 @@ export default function ReportModal({
     query: { enabled: !!activeAddress && !!memorialId },
   });
 
-  // Fetch memorial data to get owner if not passed as prop
+  // Fetch memorial data to get owner if not passed as prop.
+  // Always fetched (not only when ownerAddress is missing) so the is_banned pre-check works.
   const { data: memorialRaw } = useReadContract({
     address: contractAddress,
     abi: CONTRACT_ABI,
     functionName: 'memorials',
     args: [BigInt(memorialId || 0)],
-    query: { enabled: !ownerAddress && !!memorialId },
+    query: { enabled: !!memorialId },
   });
 
   const memorialOwner = ownerAddress || (Array.isArray(memorialRaw) ? memorialRaw[0] : memorialRaw?.owner);
   const isBanned = Array.isArray(memorialRaw) ? Boolean(memorialRaw[6]) : Boolean(memorialRaw?.is_banned ?? memorialRaw?.isBanned);
   const hasMemorials = Number(hasCreatedMemorial) > 0 || hasCreatedMemorial === true;
+  // Don't flash the "Sybil Guard Active" notice while has_created_memorial is still loading.
+  const showSybilNotice = isSybilCheckFetched && !hasMemorials;
   const isOwnMemorial = !!activeAddress && !!memorialOwner && String(memorialOwner).toLowerCase() === String(activeAddress).toLowerCase();
 
   const userReportEpoch = Number(hasReported || 0);
@@ -144,138 +156,178 @@ export default function ReportModal({
     }
   }, [activeAddress, memorialId, epoch, reportWeight]);
 
-  const { writeContractAsync, data: txHash, isPending } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash });
+  const { writeContractAsync, data: txHash, isPending, reset: resetWrite } = useWriteContract();
+  const {
+    isLoading: isConfirming,
+    isSuccess,
+    isError: isReceiptError,
+    error: receiptError,
+  } = useWaitForTransactionReceipt({
+    hash: txHash,
+    chainId: baseSepolia.id,
+    timeout: RECEIPT_TIMEOUT_MS,
+  });
+
+  // Keep the latest callbacks in refs so effects don't re-run when the parent passes new inline
+  // functions on every render (MemorialPage re-renders every 15s from its clock ticker).
+  const onSuccessRef = useRef(onSuccess);
+  useEffect(() => {
+    onSuccessRef.current = onSuccess;
+  }, [onSuccess]);
+
+  const resetWriteRef = useRef(resetWrite);
+  useEffect(() => {
+    resetWriteRef.current = resetWrite;
+  }, [resetWrite]);
+
+  // Tx hash whose success has already been handled — guarantees onSuccess fires exactly once per tx.
+  const handledHashRef = useRef(null);
 
   useEffect(() => {
-    if (isSuccess) {
-      if (typeof window !== 'undefined' && window.localStorage && reportKey) {
-        window.localStorage.setItem(reportKey, 'true');
-        if (activeAddress && memorialId) {
-          window.localStorage.removeItem(`mc_reported_${activeAddress.toLowerCase()}_${memorialId}`);
-        }
-      }
-      if (refetchHasReported) refetchHasReported();
-      if (refetchReportEpoch) refetchReportEpoch();
-      if (refetchReportWeight) refetchReportWeight();
-      if (onSuccess) {
-        onSuccess();
+    if (!isSuccess || !txHash || handledHashRef.current === txHash) return;
+    handledHashRef.current = txHash;
+
+    if (typeof window !== 'undefined' && window.localStorage && reportKey) {
+      window.localStorage.setItem(reportKey, 'true');
+      if (activeAddress && memorialId) {
+        window.localStorage.removeItem(`mc_reported_${activeAddress.toLowerCase()}_${memorialId}`);
       }
     }
-  }, [isSuccess, reportKey, activeAddress, memorialId, onSuccess]);
+    if (refetchHasReported) refetchHasReported();
+    if (refetchReportEpoch) refetchReportEpoch();
+    if (refetchReportWeight) refetchReportWeight();
+    onSuccessRef.current?.();
+  }, [isSuccess, txHash, reportKey, activeAddress, memorialId, refetchHasReported, refetchReportEpoch, refetchReportWeight]);
+
+  // Reset stale write/receipt state whenever the modal is (re)opened — but never drop a tx that is
+  // still in flight (its success must still be handled exactly once).
+  const isTxInFlightRef = useRef(false);
+  useEffect(() => {
+    isTxInFlightRef.current = isPending || isConfirming;
+  }, [isPending, isConfirming]);
+  useEffect(() => {
+    if (!isOpen || isTxInFlightRef.current || submittingRef.current) return;
+    resetWriteRef.current?.();
+  }, [isOpen]);
+
+  const closeTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(closeTimerRef.current), []);
 
   const handleClose = () => {
     if (isClosing) return;
     setIsClosing(true);
-    setTimeout(() => {
+    clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => {
       setIsClosing(false);
       setError('');
       onClose();
     }, 300);
   };
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        handleClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Body scroll lock + Escape (always calls the latest handleClose).
+  useModalBehavior(isOpen, handleClose);
 
   const handleSubmit = async () => {
-    console.log('[Report] Submit clicked, reason:', selectedReason);
-    setError('');
-
-    if (!isConnected && !embeddedWallet) {
-      alert('Please connect your wallet first.');
-      return;
-    }
-
-    if (isBanned) {
-      setError('This memorial has already been banned by Council moderation.');
-      return;
-    }
-
-    if (!hasMemorials) {
-      setError('Sybil Guard: You must own at least one memorial on Memory Chain to submit a report.');
-      return;
-    }
-
-    if (isOwnMemorial) {
-      setError('You cannot report your own memorial.');
-      return;
-    }
-
-    if (alreadyReported) {
-      setError('You have already reported this memorial.');
-      return;
-    }
-
-    if (!connector) {
-      console.error('Wallet connector is missing or Privy was blocked.');
-      setError('Wallet connection failed. Please disable your adblocker or reconnect your wallet.');
-      return;
-    }
-
-    if (chain?.id !== baseSepolia.id) {
-      try {
-        await switchChainAsync({ chainId: baseSepolia.id });
-      } catch (switchErr) {
-        console.error('[Report] Switch chain error:', switchErr);
-        alert('Please switch network to Base Sepolia.');
-        return;
-      }
-    }
+    // Synchronous lock: covers the window during await switchChainAsync before wagmi isPending flips.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setIsSubmitting(true);
 
     try {
-      const gasConfig = {};
-      if (feeData?.maxFeePerGas) {
-        gasConfig.maxFeePerGas = (feeData.maxFeePerGas * 130n) / 100n;
-      }
-      if (feeData?.maxPriorityFeePerGas) {
-        gasConfig.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * 130n) / 100n;
+      console.log('[Report] Submit clicked, reason:', selectedReason);
+      setError('');
+
+      if (!isConnected && !embeddedWallet) {
+        setError('Please connect your wallet first.');
+        return;
       }
 
-      const hash = await writeContractAsync({
-        address: contractAddress,
-        abi: CONTRACT_ABI,
-        functionName: 'report_memorial',
-        args: [BigInt(memorialId || 0)],
-        account: activeAddress,
-        connector,
-        chainId: baseSepolia.id,
-        ...gasConfig,
-      });
+      if (isBanned) {
+        setError('This memorial has already been banned by Council moderation.');
+        return;
+      }
 
-      console.log('[Report] Submitted tx hash:', hash);
-    } catch (err) {
-      console.error('[Report] Transaction failed:', err);
-      const msg = err?.shortMessage || err?.message || 'Report transaction failed';
-      if (msg.includes('Sybil Guard') || msg.includes('Must own a memorial')) {
-        setError('Sybil Guard Notice: You must own a memorial on Memory Chain to report content.');
-      } else if (msg.includes('Already reported')) {
+      if (!hasMemorials) {
+        setError('Sybil Guard: You must own at least one memorial on Memory Chain to submit a report.');
+        return;
+      }
+
+      if (isOwnMemorial) {
+        setError('You cannot report your own memorial.');
+        return;
+      }
+
+      if (alreadyReported) {
         setError('You have already reported this memorial.');
-      } else {
-        setError(msg);
+        return;
       }
+
+      if (!connector) {
+        console.error('Wallet connector is missing or Privy was blocked.');
+        setError('Wallet connection failed. Please disable your adblocker or reconnect your wallet.');
+        return;
+      }
+
+      if (chain?.id !== baseSepolia.id) {
+        try {
+          await switchChainAsync({ chainId: baseSepolia.id });
+        } catch (switchErr) {
+          console.error('[Report] Switch chain error:', switchErr);
+          setError(formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia and try again.'));
+          return;
+        }
+      }
+
+      // Clear a previous failed attempt (e.g. receipt timeout / revert) before sending a new tx.
+      resetWriteRef.current?.();
+
+      try {
+        const gasConfig = {};
+        if (feeData?.maxFeePerGas) {
+          gasConfig.maxFeePerGas = (feeData.maxFeePerGas * 130n) / 100n;
+        }
+        if (feeData?.maxPriorityFeePerGas) {
+          gasConfig.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * 130n) / 100n;
+        }
+
+        const hash = await writeContractAsync({
+          address: contractAddress,
+          abi: CONTRACT_ABI,
+          functionName: 'report_memorial',
+          args: [BigInt(memorialId || 0)],
+          account: activeAddress,
+          connector,
+          chainId: baseSepolia.id,
+          ...gasConfig,
+        });
+
+        console.log('[Report] Submitted tx hash:', hash);
+      } catch (err) {
+        console.error('[Report] Transaction failed:', err);
+        setError(formatTxError(err, 'Report transaction failed. Please try again.'));
+      }
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
   if (!isOpen && !isClosing) return null;
 
-  const isDisabled = isPending || isConfirming || !hasMemorials || isOwnMemorial || alreadyReported || isBanned;
+  const displayError = error || (isReceiptError ? formatTxError(receiptError, 'The report transaction failed to confirm.') : '');
+  const isDisabled = isSubmitting || isPending || isConfirming || !hasMemorials || isOwnMemorial || alreadyReported || isBanned;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[60] flex justify-center overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
       onClick={handleClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="report-modal-title"
     >
       {/* Backdrop */}
       <div
-        className={`absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-300 ${
+        className={`fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-300 ${
           isClosing ? 'opacity-0' : 'opacity-100'
         }`}
       />
@@ -283,7 +335,7 @@ export default function ReportModal({
       {/* Modal Card */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`relative w-full max-w-md bg-[#fdfcfa] rounded-[24px] border border-[#d8c2ba]/40 shadow-2xl overflow-hidden transition-all duration-300 ${
+        className={`relative my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain bg-[#fdfcfa] rounded-[24px] border border-[#d8c2ba]/40 shadow-2xl transition-all duration-300 ${
           isClosing ? 'opacity-0 scale-95' : 'opacity-100 scale-100'
         }`}
       >
@@ -292,7 +344,8 @@ export default function ReportModal({
           <button
             type="button"
             onClick={handleClose}
-            className="absolute top-4 right-4 w-8 h-8 rounded-full bg-[#f5f3f0] flex items-center justify-center hover:bg-[#e8e5e0] transition-colors cursor-pointer"
+            aria-label="Close"
+            className="absolute top-3 right-3 w-10 h-10 rounded-full bg-[#f5f3f0] flex items-center justify-center hover:bg-[#e8e5e0] transition-colors cursor-pointer"
           >
             <span className="material-symbols-outlined text-[#5A5047] text-lg">close</span>
           </button>
@@ -301,7 +354,7 @@ export default function ReportModal({
             <span className="material-symbols-outlined text-2xl">flag</span>
           </div>
 
-          <h2 className="text-xl text-[#1b1c1a] mb-1" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+          <h2 id="report-modal-title" className="text-xl text-[#1b1c1a] mb-1" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
             Report Memorial
           </h2>
           <p className="text-xs text-[#53433e]">
@@ -333,7 +386,7 @@ export default function ReportModal({
                 <span className="material-symbols-outlined text-red-600 text-[20px] flex-shrink-0">block</span>
                 <span>This memorial has already been banned by Council moderation.</span>
               </div>
-            ) : !hasMemorials ? (
+            ) : showSybilNotice ? (
               <div className="p-3 mb-1 text-sm text-[#53433e] bg-[#f5f0eb] border border-[#e0d0c7] rounded-xl flex items-start gap-3">
                 <span className="material-symbols-outlined text-[#C16226] text-[20px] mt-0.5 flex-shrink-0">security</span>
                 <div>
@@ -387,13 +440,16 @@ export default function ReportModal({
                   </label>
                 );
               })}
+              <p className="text-[11px] text-[#7A6B60] leading-relaxed pt-1">
+                Your report is recorded on-chain anonymously by memorial ID; the reason helps you confirm your choice and is not stored.
+              </p>
             </div>
           )}
 
           {/* Error Message */}
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-xl py-2.5 px-3 text-xs text-red-700 text-center">
-              {error}
+          {displayError && (
+            <div role="alert" className="bg-red-50 border border-red-200 rounded-xl py-2.5 px-3 text-xs text-red-700 text-center">
+              {displayError}
             </div>
           )}
 
@@ -426,7 +482,7 @@ export default function ReportModal({
                   : 'bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md'
               }`}
             >
-              {isPending
+              {isPending || isSubmitting
                 ? 'Submitting...'
                 : isConfirming
                   ? 'Confirming on Base Sepolia...'

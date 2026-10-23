@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt, useEstimateFeesPerGas, useChainId, usePublicClient, useAccount, useSwitchChain, useBalance } from 'wagmi';
+import { useState, useEffect, useRef } from 'react';
+import { useReadContract, useWriteContract, useEstimateFeesPerGas, useChainId, usePublicClient, useAccount, useSwitchChain, useBalance } from 'wagmi';
 import { parseEther, formatEther } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress } from '../config/chains';
+import { getContractAddress, getExplorerUrl } from '../config/chains';
+import { formatTxError, isUserRejection } from '../utils/txErrors';
+import { useModalBehavior } from '../hooks/useModalBehavior';
 
 const CANDLE_TIERS = [
   { type: 1, label: '1h',  duration: '1 hour',  multiplier: 1n },
@@ -23,6 +25,8 @@ export const TIER_HOURS = {
 // Mock conversion rate — replace with Chainlink oracle / CoinGecko API later
 const ETH_USD_RATE = 3000;
 const HIGH_DONATION_THRESHOLD = 0.01; // ETH
+// Base Sepolia blocks are ~2s; a tx not mined within 3 minutes is reported as "still pending"
+const RECEIPT_TIMEOUT_MS = 180_000;
 
 export default function LightCandleModal({ isOpen = false, onClose = () => {}, memorialId = 0, petName = '', onSuccess = () => {}, currentExpiry = 0 }) {
   const chainId = useChainId();
@@ -65,7 +69,6 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
   const [isClosing, setIsClosing] = useState(false);
 
   const [currentTxHash, setCurrentTxHash] = useState(null);
-  const [isSessionSuccess, setIsSessionSuccess] = useState(false);
 
   // Added hours & duration calculation (placed at top to prevent TDZ ReferenceError)
   const tierAddedHours = TIER_HOURS[selectedTier] || 1;
@@ -76,8 +79,14 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
   const customEthAmount = usdAmount ? parseFloat(usdAmount) / ETH_USD_RATE : 0;
   const customEthDisplay = customEthAmount > 0 ? customEthAmount.toFixed(6) : '0.000000';
-  const customEthStr = customEthAmount > 0 ? customEthAmount.toFixed(12) : '0';
-  const customWei = parseEther(customEthStr);
+  const customEthStr = customEthAmount > 0 && Number.isFinite(customEthAmount) ? customEthAmount.toFixed(12) : '0';
+  // Absurdly large inputs make toFixed() return exponent notation, which parseEther rejects — never crash the render
+  let customWei = 0n;
+  try {
+    customWei = parseEther(customEthStr);
+  } catch {
+    customWei = 0n;
+  }
   const customAddedHours = minCandlePriceWei > 0n ? Math.floor(Number(customWei / minCandlePriceWei)) : 0;
 
   // Primary addedHours variable: in tier mode uses TIER_HOURS, in custom mode uses calculated hours
@@ -105,71 +114,89 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
   const isInsufficientFunds = Boolean(balance?.value !== undefined && balance.value < requiredWei);
 
   const { writeContractAsync, isPending: isWriting, reset: resetWrite } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
-    hash: currentTxHash,
-    query: {
-      enabled: Boolean(currentTxHash),
-    },
-  });
 
-  const isConfirmed = Boolean(isSessionSuccess && isSuccess && currentTxHash);
+  /**
+   * Transaction lifecycle (single source of truth, driven imperatively from handleSubmit):
+   *   idle → preparing (network switch + simulation) → wallet (awaiting signature)
+   *        → confirming (awaiting receipt) → success
+   * The receipt is awaited inside handleSubmit, so `onSuccess` fires exactly once per
+   * transaction and keeps working even if the user closes the modal while it confirms.
+   */
+  const [txPhase, setTxPhase] = useState('idle');
+  const submittingRef = useRef(false);
+  const onSuccessRef = useRef(onSuccess);
+  useEffect(() => {
+    onSuccessRef.current = onSuccess;
+  }, [onSuccess]);
+
+  const isPreparing = txPhase === 'preparing';
+  const isConfirming = txPhase === 'confirming';
+  const isConfirmed = txPhase === 'success';
+  const isBusy = isPreparing || isWriting || txPhase === 'wallet' || isConfirming;
+  const isPriceLoading = candlePriceRaw === undefined;
 
   const isSubmitDisabled =
-    ((isWriting ||
-      isConfirming ||
+    ((isBusy ||
+      isPriceLoading ||
       !activeAddress ||
       isInsufficientFunds ||
       isCandlesPaused ||
       (mode === 'custom' && isBelowMin)) &&
       !isConfirmed);
 
-  // Reset state on modal open
+  // Reset state on modal open (a transaction still confirming in the background is left alone)
   useEffect(() => {
     if (isOpen) {
-      setCurrentTxHash(null);
-      setIsSessionSuccess(false);
-      setError('');
-      if (typeof resetWrite === 'function') {
-        resetWrite();
+      if (!submittingRef.current) {
+        setCurrentTxHash(null);
+        setTxPhase('idle');
+        setError('');
+        if (typeof resetWrite === 'function') {
+          resetWrite();
+        }
       }
     }
   }, [isOpen, resetWrite]);
 
-  // Trigger reactive UI update when tx is mined in current session
-  useEffect(() => {
-    if (isSuccess && currentTxHash) {
-      setIsSessionSuccess(true);
-      if (onSuccess) {
-        console.log('🔥 Candle Lit Transaction Confirmed!');
-        const tierOrDuration = mode === 'tier' ? selectedTier : Math.max(1, addedHours) * 3600;
-        onSuccess(tierOrDuration);
-      }
-    }
-  }, [isSuccess, currentTxHash, onSuccess, mode, selectedTier, addedHours]);
-
   const handleClose = () => {
+    if (isClosing) return;
     setIsClosing(true);
     setTimeout(() => {
       setIsClosing(false);
-      setCurrentTxHash(null);
-      setIsSessionSuccess(false);
       setError('');
-      if (typeof resetWrite === 'function') {
-        resetWrite();
-      }
       onClose();
     }, 300);
   };
 
+  useModalBehavior(isOpen && !isClosing, handleClose);
+
+  // The flame was already registered via onSuccess when the receipt confirmed
   const handleViewFlame = () => {
-    if (onSuccess) {
-      const tierOrDuration = mode === 'tier' ? selectedTier : Math.max(1, addedHours) * 3600;
-      onSuccess(tierOrDuration);
-    }
     handleClose();
   };
 
+  /** Make sure the connected wallet is on Base Sepolia before sending anything. */
+  const ensureBaseSepolia = async () => {
+    if (chain?.id === baseSepolia.id) return true;
+    try {
+      if (isConnected) {
+        await switchChainAsync({ chainId: baseSepolia.id });
+      } else if (embeddedWallet?.switchChain) {
+        await embeddedWallet.switchChain(baseSepolia.id);
+      }
+      return true;
+    } catch (switchErr) {
+      console.error('[Candle] Failed to switch network:', switchErr);
+      setError(isUserRejection(switchErr)
+        ? 'Network switch was cancelled. Please switch your wallet to Base Sepolia to continue.'
+        : 'Please switch your wallet network to Base Sepolia to continue.');
+      return false;
+    }
+  };
+
   const handleSubmit = async () => {
+    // Double-tap guard: a second tap while the wallet / network prompt is opening is ignored
+    if (submittingRef.current) return;
     console.log('[Candle] Button clicked, mode:', mode);
     setError('');
 
@@ -178,8 +205,13 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       return;
     }
 
+    if (isPriceLoading) {
+      setError('Loading the current candle price. Please try again in a moment.');
+      return;
+    }
+
     if (isInsufficientFunds) {
-      setError('Insufficient ETH Balance');
+      setError('Insufficient Base Sepolia ETH balance for this offering.');
       return;
     }
 
@@ -190,40 +222,44 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       return;
     }
 
-    // Ensure wallet is connected to Base Sepolia
-    if (chain?.id !== baseSepolia.id) {
-      console.log('[Candle] Switching network to Base Sepolia...');
-      try {
-        await switchChainAsync({ chainId: baseSepolia.id });
-      } catch (switchErr) {
-        console.error('[Candle] Failed to switch network:', switchErr);
-        alert('Please switch your wallet network to Base Sepolia to continue.');
+    if (mode === 'custom') {
+      const usdNum = parseFloat(usdAmount);
+      if (!usdAmount || isNaN(usdNum) || usdNum <= 0) {
+        setError('Please enter a donation amount.');
         return;
+      }
+
+      if (customWei < minCandlePriceWei) {
+        setError(`Minimum offering is ${formatEther(minCandlePriceWei)} ETH (~$${(Number(formatEther(minCandlePriceWei)) * ETH_USD_RATE).toFixed(2)})`);
+        return;
+      }
+
+      // Fat Finger check for large donation amounts
+      if (customEthAmount >= HIGH_DONATION_THRESHOLD) {
+        const confirmed = window.confirm(
+          `You are about to donate ${customEthDisplay} ETH to keep this memory alive. Are you sure you want to proceed?`
+        );
+        if (!confirmed) {
+          return;
+        }
       }
     }
 
+    submittingRef.current = true;
+    // Snapshot what is being paid for, so later UI changes cannot alter the optimistic update
+    const isTierMode = mode === 'tier';
+    const successPayload = isTierMode
+      ? { type: 'tier', tier: selectedTier, seconds: TIER_HOURS[selectedTier] * 3600 }
+      : { type: 'custom', seconds: Math.max(1, addedHours) * 3600 };
+
     try {
-      if (mode === 'custom') {
-        const usdNum = parseFloat(usdAmount);
-        if (!usdAmount || isNaN(usdNum) || usdNum <= 0) {
-          setError('Please enter a donation amount.');
-          return;
-        }
+      setTxPhase('preparing');
 
-        if (customWei < minCandlePriceWei) {
-          setError(`Minimum offering is ${formatEther(minCandlePriceWei)} ETH (~$${(Number(formatEther(minCandlePriceWei)) * ETH_USD_RATE).toFixed(2)})`);
-          return;
-        }
-
-        // Fat Finger check for large donation amounts
-        if (customEthAmount >= HIGH_DONATION_THRESHOLD) {
-          const confirmed = window.confirm(
-            `You are about to donate ${customEthDisplay} ETH to keep this memory alive. Are you sure you want to proceed?`
-          );
-          if (!confirmed) {
-            return;
-          }
-        }
+      // Ensure wallet is connected to Base Sepolia
+      const onBaseSepolia = await ensureBaseSepolia();
+      if (!onBaseSepolia) {
+        setTxPhase('idle');
+        return;
       }
 
       // Gas fee estimation with +30% buffer
@@ -235,7 +271,6 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
         ? (feeData.maxPriorityFeePerGas * 130n) / 100n
         : undefined;
 
-      const isTierMode = mode === 'tier';
       const txArgs = {
         address: contractAddress,
         abi: CONTRACT_ABI,
@@ -259,11 +294,8 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
           console.log('[Candle] simulateContract OK — sending tx');
         } catch (simErr) {
           console.error('[Candle] simulateContract REVERT:', simErr);
-          const reason = simErr?.cause?.reason
-            || simErr?.shortMessage
-            || simErr?.message
-            || 'Transaction will revert.';
-          setError(reason);
+          setError(formatTxError(simErr, 'This transaction would fail. Please try again.'));
+          setTxPhase('idle');
           return;
         }
       } else {
@@ -271,6 +303,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       }
 
       console.log('[Candle] Sending transaction via writeContractAsync...');
+      setTxPhase('wallet');
       const hash = await writeContractAsync({
         ...txArgs,
         account: activeAddress,
@@ -279,16 +312,36 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
       console.log('[Candle] Tx submitted! Hash:', hash);
       setCurrentTxHash(hash);
-    } catch (error) {
-      console.error('[Candle] Transaction failed or rejected:', error);
-      setError(error?.shortMessage || error?.message || 'Transaction rejected or failed');
+      setTxPhase('confirming');
+
+      if (!publicClient) throw new Error('Network client unavailable');
+      const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
+      if (receipt.status !== 'success') {
+        throw new Error('Transaction reverted');
+      }
+
+      console.log('🔥 Candle Lit Transaction Confirmed!');
+      // Fires once per confirmed tx, even if the modal was closed meanwhile
+      onSuccessRef.current?.(successPayload);
+      setTxPhase('success');
+    } catch (err) {
+      console.error('[Candle] Transaction failed or rejected:', err);
+      setError(formatTxError(err, 'Transaction rejected or failed.'));
+      setTxPhase('idle');
+    } finally {
+      submittingRef.current = false;
     }
   };
 
   if (!isOpen && !isClosing) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
+      role="dialog"
+      aria-modal="true"
+      aria-label={isBurning ? 'Extend the flame' : 'Light a candle'}
+    >
       {/* Backdrop */}
       <div
         className={`absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity duration-300 ${
@@ -299,15 +352,17 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
       {/* Modal */}
       <div 
-        className={`relative w-full max-w-md bg-[#fbf9f6] rounded-[20px] border border-[#E9dfd3] shadow-2xl overflow-hidden transition-all duration-300 ${
+        className={`relative w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain bg-[#fbf9f6] rounded-[20px] border border-[#E9dfd3] shadow-2xl transition-all duration-300 ${
           isClosing ? 'opacity-0 scale-95' : 'opacity-100 scale-100 animate-[modalIn_0.3s_ease-out]'
         }`}
       >
         {/* Header */}
         <div className="relative px-6 pt-6 pb-4 text-center">
           <button
+            type="button"
             onClick={handleClose}
-            className="absolute top-4 right-4 w-8 h-8 rounded-full bg-[#efeeeb] flex items-center justify-center hover:bg-[#e2e0dc] transition-colors cursor-pointer"
+            aria-label="Close"
+            className="absolute top-3 right-3 w-10 h-10 rounded-full bg-[#efeeeb] flex items-center justify-center hover:bg-[#e2e0dc] transition-colors cursor-pointer"
           >
             <span className="material-symbols-outlined text-[#5A5047] text-lg">close</span>
           </button>
@@ -456,6 +511,20 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
             <p className="text-center text-sm text-red-600 bg-red-50 rounded-[10px] py-2 px-3">{error}</p>
           )}
 
+          {/* Pending transaction: explorer link (useful on mobile if confirmation takes a while) */}
+          {currentTxHash && (isConfirming || error) && (
+            <p className="text-center text-[11px] text-[#8A7A6E]">
+              <a
+                href={`${getExplorerUrl(chainId)}/tx/${currentTxHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-[#8a4f36]"
+              >
+                View transaction on the block explorer
+              </a>
+            </p>
+          )}
+
           {/* Success State */}
           {isConfirmed && (
             <div className="text-center bg-green-50 rounded-[10px] py-3 px-4 space-y-1">
@@ -466,6 +535,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
           {/* Submit Button */}
           <button
+            type="button"
             onClick={isConfirmed ? handleViewFlame : handleSubmit}
             disabled={isSubmitDisabled}
             className={`
@@ -478,7 +548,9 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
               }
             `}
           >
-            {isWriting
+            {isPreparing
+              ? 'Preparing...'
+              : isWriting || txPhase === 'wallet'
               ? 'Confirming in Wallet...'
               : isConfirming
                 ? 'Lighting Candle on-chain...'
@@ -486,6 +558,8 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
                   ? '🕯️ VIEW THE FLAME'
                   : isCandlesPaused
                     ? 'Candle Lighting Paused'
+                    : isPriceLoading
+                    ? 'Loading Price...'
                     : !activeAddress
                       ? 'Initializing Wallet...'
                       : isInsufficientFunds
