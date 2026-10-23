@@ -546,21 +546,22 @@ export default function MemorialPage() {
           flex item of the inner stack and `order-*` keeps the mobile sequence:
             1 Arch + medallion → 2 Name & dates → 3 Compact tribute → 4 Epitaph → 5 Provenance & actions
           Desktop (>= md): the card becomes a 12-column chapel album.
-            Left (5/12): Arch + medallion, then Provenance & Share/Report.
+            Left (5/12): Arch + medallion only, vertically centered against the right stack.
             Right (7/12): Name & dates, compact tribute, epitaph.
+            Bottom (12/12): muted Eternal Provenance strip with compact Share/Report on the right.
           A single DOM tree is used for both layouts, so no block is ever duplicated.
         */}
         <div className="w-full max-w-2xl mx-auto md:max-w-4xl lg:max-w-5xl md:bg-[#FDFBF7]/90 md:border md:border-amber-900/10 md:rounded-[36px] md:p-8 lg:p-12 md:shadow-[0_20px_60px_rgba(120,80,40,0.06)]">
           <div className="flex flex-col items-center gap-3 sm:gap-4 md:grid md:grid-cols-12 md:gap-8 lg:gap-12 md:items-start">
 
             {/* ── Left column (desktop only wrapper) ───────────────────────── */}
-            <div className="contents md:flex md:flex-col md:items-center md:col-span-5">
+            <div className="contents md:flex md:flex-col md:items-center md:col-span-5 md:self-center">
 
               {/* Memorial Arch Portrait & Altar Medallion (Mobile: order-1) */}
               <div className="order-1 flex flex-col items-center text-center w-full">
                 {/* Double-framed classic memorial arch */}
                 <div
-                  className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] aspect-[4/5] md:w-64 md:h-80 lg:w-72 lg:h-[340px] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
+                  className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] aspect-[4/5] md:w-64 md:h-80 lg:w-72 lg:h-[360px] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
                   style={{ borderRadius: ARCH_OUTER_RADIUS }}
                 >
                   <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: ARCH_INNER_RADIUS }}>
@@ -598,73 +599,6 @@ export default function MemorialPage() {
                     <span className="material-symbols-outlined text-xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
                   </div>
                 )}
-              </div>
-
-              {/* Eternal Provenance & Share/Report (Mobile: order-5, last; Desktop: under the arch) */}
-              <div className="order-5 w-full max-w-2xl mx-auto flex flex-col items-center justify-between gap-6 pt-6 border-t border-outline-variant/20 md:mt-8 md:gap-5">
-                <div className="flex items-start space-x-3 text-left">
-                  <div className="mt-1">
-                    <span className="material-symbols-outlined text-primary">link</span>
-                  </div>
-                  <div>
-                    <p className="font-label-md text-label-md text-primary uppercase tracking-wider mb-1">Eternal Provenance</p>
-                    <p className="font-body-sm text-body-sm text-[#5A5047]">Secured forever on Arweave network.</p>
-                    {arweaveTxId && (
-                      <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
-                        Decentralized Ledger ID: <a href={getArweaveUrl(arweaveTxId)} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{arweaveTxId.slice(0, 10)}…{arweaveTxId.slice(-6)}</a>
-                      </p>
-                    )}
-                    {owner && (
-                      <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
-                        Owner: <a href={`${explorerUrl}/address/${owner}`} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{owner.slice(0, 8)}…{owner.slice(-6)}</a>
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-6">
-                  <button
-                    type="button"
-                    onClick={handleShare}
-                    className="flex flex-col items-center group cursor-pointer border-0 bg-transparent outline-none"
-                  >
-                    <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
-                      <span className="material-symbols-outlined text-3xl text-[#5A5047] group-hover:text-[#8a4f36] transition-colors">share</span>
-                    </div>
-                    <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">Share</span>
-                  </button>
-
-                  {!isOwner && (
-                    isReported ? (
-                      <div className="flex flex-col items-center cursor-default opacity-80" title="You have reported this memorial">
-                        <div className="w-16 h-16 bg-[#f0ede8] p-1 rounded-[16px] border border-[#d8c2ba] shadow-sm flex items-center justify-center text-[#8a7a6e]">
-                          <span className="material-symbols-outlined text-3xl">check</span>
-                        </div>
-                        <span className="font-label-md text-label-md text-[#8a7a6e] mt-2 uppercase tracking-wider text-xs">
-                          Reported
-                        </span>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (parsedMemorial?.isBanned) return;
-                          setShowReportModal(true);
-                        }}
-                        disabled={parsedMemorial?.isBanned}
-                        title={parsedMemorial?.isBanned ? 'Memorial is already banned' : 'Report memorial'}
-                        className={`flex flex-col items-center group border-0 bg-transparent outline-none ${parsedMemorial?.isBanned ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-                      >
-                        <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
-                          <span className="material-symbols-outlined text-3xl text-amber-700 group-hover:text-amber-800 transition-colors">flag</span>
-                        </div>
-                        <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">
-                          {parsedMemorial?.isBanned ? 'Banned' : 'Report'}
-                        </span>
-                      </button>
-                    )
-                  )}
-                </div>
               </div>
             </div>
 
@@ -756,6 +690,73 @@ export default function MemorialPage() {
                   </p>
                 </div>
               )}
+            </div>
+            {/* ── Footer Strip: Eternal Provenance & Share/Report ──────────────────
+                 Mobile: order-5, last block (unchanged). Desktop: full-width muted strip at the card base. */}
+            <div className="order-5 w-full max-w-2xl mx-auto flex flex-col items-center justify-between gap-6 pt-6 border-t border-outline-variant/20 md:col-span-12 md:max-w-none md:mt-4 md:pt-5 md:border-t md:border-amber-900/10 md:flex md:flex-row md:items-center md:justify-between md:gap-4">
+              <div className="flex items-start space-x-3 md:space-x-2 text-left md:min-w-0">
+                <div className="mt-1 md:mt-0">
+                  <span className="material-symbols-outlined text-primary md:text-stone-400 md:text-lg">link</span>
+                </div>
+                <div>
+                  <p className="font-label-md text-label-md text-primary uppercase tracking-wider mb-1 md:mb-0.5 md:text-[11px] md:text-stone-500">Eternal Provenance</p>
+                  <p className="font-body-sm text-body-sm text-[#5A5047] md:text-xs md:text-stone-400">Secured forever on Arweave network.</p>
+                  {arweaveTxId && (
+                    <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs md:mt-0.5 md:text-stone-400 md:truncate">
+                      Decentralized Ledger ID: <a href={getArweaveUrl(arweaveTxId)} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{arweaveTxId.slice(0, 10)}…{arweaveTxId.slice(-6)}</a>
+                    </p>
+                  )}
+                  {owner && (
+                    <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs md:mt-0.5 md:text-stone-400 md:truncate">
+                      Owner: <a href={`${explorerUrl}/address/${owner}`} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{owner.slice(0, 8)}…{owner.slice(-6)}</a>
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-6 md:gap-4 md:ml-auto md:shrink-0">
+                <button
+                  type="button"
+                  onClick={handleShare}
+                  className="flex flex-col md:flex-row items-center md:gap-2 group cursor-pointer border-0 bg-transparent outline-none"
+                >
+                  <div className="w-16 h-16 md:w-9 md:h-9 bg-[#F5efe6] p-1 md:p-0 rounded-[16px] md:rounded-full border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
+                    <span className="material-symbols-outlined text-3xl md:text-lg text-[#5A5047] group-hover:text-[#8a4f36] transition-colors">share</span>
+                  </div>
+                  <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 md:mt-0 uppercase tracking-wider transition-colors text-xs">Share</span>
+                </button>
+
+                {!isOwner && (
+                  isReported ? (
+                    <div className="flex flex-col md:flex-row items-center md:gap-2 cursor-default opacity-80" title="You have reported this memorial">
+                      <div className="w-16 h-16 md:w-9 md:h-9 bg-[#f0ede8] p-1 md:p-0 rounded-[16px] md:rounded-full border border-[#d8c2ba] shadow-sm flex items-center justify-center text-[#8a7a6e]">
+                        <span className="material-symbols-outlined text-3xl md:text-lg">check</span>
+                      </div>
+                      <span className="font-label-md text-label-md text-[#8a7a6e] mt-2 md:mt-0 uppercase tracking-wider text-xs">
+                        Reported
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (parsedMemorial?.isBanned) return;
+                        setShowReportModal(true);
+                      }}
+                      disabled={parsedMemorial?.isBanned}
+                      title={parsedMemorial?.isBanned ? 'Memorial is already banned' : 'Report memorial'}
+                      className={`flex flex-col md:flex-row items-center md:gap-2 group border-0 bg-transparent outline-none ${parsedMemorial?.isBanned ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      <div className="w-16 h-16 md:w-9 md:h-9 bg-[#F5efe6] p-1 md:p-0 rounded-[16px] md:rounded-full border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
+                        <span className="material-symbols-outlined text-3xl md:text-lg text-amber-700 group-hover:text-amber-800 transition-colors">flag</span>
+                      </div>
+                      <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 md:mt-0 uppercase tracking-wider transition-colors text-xs">
+                        {parsedMemorial?.isBanned ? 'Banned' : 'Report'}
+                      </span>
+                    </button>
+                  )
+                )}
+              </div>
             </div>
           </div>
         </div>
