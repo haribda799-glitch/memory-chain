@@ -1,7 +1,7 @@
 import { useParams, Link } from 'react-router-dom';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { useReadContract, useChainId } from 'wagmi';
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
 import { getArweaveUrl, isMockTxId, TESTNET_TEMPORARY_STORAGE_NOTICE } from '../utils/arweave';
@@ -31,9 +31,8 @@ const cleanTrait = (value) => {
   return EMPTY_TRAIT_VALUES.has(text.toLowerCase()) ? '' : text;
 };
 
-/** Vibrant golden-amber flame rendered inside the high-contrast arch base medallion. */
+/** Multi-layer solid filled candle flame tongue inside the arch base medallion (no hollow center). */
 function MedallionFlame() {
-  const uid = useId().replace(/:/g, '');
   return (
     <svg
       width="22"
@@ -45,59 +44,58 @@ function MedallionFlame() {
       className="relative z-10 animate-[medallionFlameFlicker_2.6s_ease-in-out_infinite]"
       style={{ filter: 'drop-shadow(0 0 6px rgba(245, 158, 11, 0.75))' }}
     >
-      {/* Outer golden-amber flame (#F59E0B -> #FBBF24) */}
+      {/* 1. Outer layer: soft amber-orange (#F59E0B) with organic flame tongue tip */}
       <path
-        d="M11 1.5C11 1.5 3 10.8 3 18.5C3 23.4 6.58 27.2 11 27.2C15.42 27.2 19 23.4 19 18.5C19 10.8 11 1.5 11 1.5Z"
-        fill={`url(#medallionOuter_${uid})`}
+        d="M12.2 1.2C14.9 5.9 19.2 12.4 19.2 19.1C19.2 24.3 15.6 28.2 11 28.2C6.4 28.2 2.8 24.3 2.8 19.1C2.8 12.1 8.1 6.6 12.2 1.2Z"
+        fill="#F59E0B"
       />
-      {/* Middle warm amber-yellow layer */}
+      {/* 2. Middle layer: solid golden-yellow (#FBBF24) filling the flame body */}
       <path
-        d="M11 6.5C11 6.5 5.5 13.5 5.5 18.8C5.5 22.1 7.96 24.8 11 24.8C14.04 24.8 16.5 22.1 16.5 18.8C16.5 13.5 11 6.5 11 6.5Z"
-        fill={`url(#medallionMid_${uid})`}
-        opacity="0.95"
+        d="M11.6 6.4C13.7 10.2 16.6 14.9 16.6 19.9C16.6 23.9 14.2 27.0 11 27.0C7.8 27.0 5.4 23.9 5.4 19.9C5.4 14.6 9.1 10.6 11.6 6.4Z"
+        fill="#FBBF24"
       />
-      {/* Inner glowing white-yellow core */}
+      {/* 3. Inner glowing core at the base: warm white light (#FEF3C7) */}
       <path
-        d="M11 11.5C11 11.5 7.5 16.2 7.5 19.5C7.5 21.6 9.07 23.3 11 23.3C12.93 23.3 14.5 21.6 14.5 19.5C14.5 16.2 11 11.5 11 11.5Z"
+        d="M11 15.0C12.3 17.4 13.6 20.0 13.6 22.6C13.6 24.9 12.5 26.5 11 26.5C9.5 26.5 8.4 24.9 8.4 22.6C8.4 20.0 9.7 17.4 11 15.0Z"
         fill="#FEF3C7"
       />
-      <ellipse cx="11" cy="20.5" rx="2.2" ry="1.8" fill="#FFFBEB" />
-      <defs>
-        <linearGradient id={`medallionOuter_${uid}`} x1="11" y1="1.5" x2="11" y2="27.2" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FBBF24" />
-          <stop offset="55%" stopColor="#F59E0B" />
-          <stop offset="100%" stopColor="#D97706" />
-        </linearGradient>
-        <linearGradient id={`medallionMid_${uid}`} x1="11" y1="6.5" x2="11" y2="24.8" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FEF08A" />
-          <stop offset="55%" stopColor="#FBBF24" />
-          <stop offset="100%" stopColor="#F59E0B" />
-        </linearGradient>
-      </defs>
     </svg>
   );
 }
 
-/** Tiny flame glyph used inside the compact mobile tribute box. */
+/** Multi-layer solid filled mini flame glyph used inside the compact mobile tribute box. */
 function MiniFlame({ delay = 0, unlit = false }) {
   if (unlit) {
     return (
-      <svg width="12" height="17" viewBox="0 0 15 22" fill="none" aria-hidden="true" className="shrink-0 text-[#b5a79a]">
+      <svg width="13" height="18" viewBox="0 0 22 30" fill="none" aria-hidden="true" className="shrink-0 text-[#b5a79a]">
         <path
-          d="M7.5 1.5C7.5 1.5 2 7.5 2 13C2 16.5 4.5 19.5 7.5 19.5C10.5 19.5 13 16.5 13 13C13 7.5 7.5 1.5 7.5 1.5Z"
-          stroke="currentColor" strokeWidth="1.2" strokeDasharray="2.5 1.5" fill="currentColor" fillOpacity="0.06"
+          d="M12.2 1.8C14.8 6.3 18.8 12.5 18.8 19.0C18.8 24.0 15.3 27.8 11 27.8C6.7 27.8 3.2 24.0 3.2 19.0C3.2 12.2 8.2 6.9 12.2 1.8Z"
+          stroke="currentColor" strokeWidth="1.6" strokeDasharray="3 2" fill="currentColor" fillOpacity="0.08"
         />
       </svg>
     );
   }
   return (
     <svg
-      width="11" height="16" viewBox="0 0 15 22" fill="none" aria-hidden="true"
+      width="13" height="18" viewBox="0 0 22 30" fill="none" aria-hidden="true"
       className="shrink-0 animate-[flameFloat_3s_ease-in-out_infinite]"
-      style={{ filter: 'drop-shadow(0 0 3px rgba(245,158,11,0.6))', animationDelay: `${delay}s` }}
+      style={{ filter: 'drop-shadow(0 0 3px rgba(245,158,11,0.55))', animationDelay: `${delay}s` }}
     >
-      <path d="M7.5 0C7.5 0 1.5 7.5 1.5 13C1.5 16.5 4.2 19.5 7.5 19.5C10.8 19.5 13.5 16.5 13.5 13C13.5 7.5 7.5 0 7.5 0Z" fill="#F59E0B" />
-      <path d="M7.5 7C7.5 7 4.5 11 4.5 13.5C4.5 15.2 5.8 16.5 7.5 16.5C9.2 16.5 10.5 15.2 10.5 13.5C10.5 11 7.5 7 7.5 7Z" fill="#FEF3C7" opacity="0.85" />
+      {/* 1. Outer layer: soft amber-orange (#F59E0B) */}
+      <path
+        d="M12.2 1.2C14.9 5.9 19.2 12.4 19.2 19.1C19.2 24.3 15.6 28.2 11 28.2C6.4 28.2 2.8 24.3 2.8 19.1C2.8 12.1 8.1 6.6 12.2 1.2Z"
+        fill="#F59E0B"
+      />
+      {/* 2. Middle layer: solid golden-yellow (#FBBF24) */}
+      <path
+        d="M11.6 6.4C13.7 10.2 16.6 14.9 16.6 19.9C16.6 23.9 14.2 27.0 11 27.0C7.8 27.0 5.4 23.9 5.4 19.9C5.4 14.6 9.1 10.6 11.6 6.4Z"
+        fill="#FBBF24"
+      />
+      {/* 3. Inner glowing core at the base: warm white light (#FEF3C7) */}
+      <path
+        d="M11 15.0C12.3 17.4 13.6 20.0 13.6 22.6C13.6 24.9 12.5 26.5 11 26.5C9.5 26.5 8.4 24.9 8.4 22.6C8.4 20.0 9.7 17.4 11 15.0Z"
+        fill="#FEF3C7"
+      />
     </svg>
   );
 }
@@ -367,16 +365,22 @@ export default function MemorialPage() {
     ? `https://arweave.net/${rawImage.slice(5)}`
     : rawImage;
 
-  // Resolve epitaph/story: never allow the technical testnet storage notice to replace the poetic quote card
-  const rawDescription = String(metadata?.epitaph || metadata?.description || '').trim();
-  const isSystemStorageNotice =
-    rawDescription.startsWith('This memorial was created on testnet with temporary storage') ||
-    rawDescription === 'Metadata temporarily unavailable';
+  const attributes  = metadata?.attributes  || [];
+  const findAttr    = (trait) => attributes.find(a => a.trait_type === trait)?.value;
 
-  const isTestnetTemporaryStorage =
-    isMockTxId(arweaveTxId) ||
-    Boolean(metadata?.isTemporaryStoragePlaceholder) ||
-    rawDescription.startsWith('This memorial was created on testnet with temporary storage');
+  // Strict priority for user-entered epitaph/bio/message over the generic fallback or technical testnet notice
+  const isTechnicalNotice = (val) => {
+    const t = String(val ?? '').trim();
+    return (
+      !t ||
+      t.startsWith('This memorial was created on testnet with temporary storage') ||
+      t === 'Metadata temporarily unavailable'
+    );
+  };
+
+  const defaultFallbackEpitaph = `In loving memory of ${petName || 'this beloved companion'}. Forever on the blockchain.`;
+  const isGenericFallback = (val) =>
+    String(val ?? '').trim().toLowerCase() === defaultFallbackEpitaph.toLowerCase();
 
   let localSavedEpitaph = '';
   if (typeof window !== 'undefined' && window.localStorage && petName) {
@@ -387,12 +391,31 @@ export default function MemorialPage() {
     }
   }
 
-  const description = (!isSystemStorageNotice && rawDescription)
-    ? rawDescription
-    : (localSavedEpitaph || `In loving memory of ${petName || 'this beloved companion'}. Forever on the blockchain.`);
+  const candidateEpitaphs = [
+    metadata?.bio,
+    metadata?.epitaph,
+    metadata?.message,
+    metadata?.story,
+    findAttr('Epitaph'),
+    findAttr('Bio'),
+    findAttr('Story'),
+    metadata?.description,
+    localSavedEpitaph,
+  ]
+    .map((v) => String(v ?? '').trim())
+    .filter((v) => !isTechnicalNotice(v));
 
-  const attributes  = metadata?.attributes  || [];
-  const findAttr    = (trait) => attributes.find(a => a.trait_type === trait)?.value;
+  // 1. Prefer custom user-entered text (distinct from the generic fallback)
+  // 2. Otherwise use any non-technical text in metadata
+  // 3. Otherwise use the generic fallback
+  const customUserEpitaph = candidateEpitaphs.find((v) => !isGenericFallback(v));
+  const description = customUserEpitaph || candidateEpitaphs[0] || defaultFallbackEpitaph;
+
+  const rawDescCheck = String(metadata?.description || metadata?.epitaph || '').trim();
+  const isTestnetTemporaryStorage =
+    isMockTxId(arweaveTxId) ||
+    Boolean(metadata?.isTemporaryStoragePlaceholder) ||
+    rawDescCheck.startsWith('This memorial was created on testnet with temporary storage');
 
   const formatDate = (val) => {
     if (!val) return null;
@@ -533,24 +556,36 @@ export default function MemorialPage() {
           aria-label="Candle tribute"
           className="order-2 md:hidden mt-1 px-4 py-3.5 rounded-2xl bg-amber-50/70 border border-amber-900/10 max-w-sm w-full mx-auto flex flex-col items-center text-center"
         >
-          <div className="flex items-center justify-center gap-2 flex-nowrap">
-            {isBurning && candlesCount > 0 ? (
-              <span className="inline-flex items-center gap-1 shrink-0">
-                {Array.from({ length: Math.min(candlesCount, 5) }).map((_, i) => (
-                  <MiniFlame key={i} delay={i * 0.35} />
-                ))}
-              </span>
-            ) : (
-              <MiniFlame unlit />
-            )}
+          <div className="flex flex-col items-center w-full">
+            {/* Row 1: centered row of up to 5 mini-flame icons (+N badge if > 5) */}
+            <div className="flex items-center justify-center gap-1.5 mb-1.5">
+              {isBurning && candlesCount > 0 ? (
+                <>
+                  {Array.from({ length: Math.min(candlesCount, 5) }).map((_, i) => (
+                    <MiniFlame key={i} delay={i * 0.35} />
+                  ))}
+                  {candlesCount > 5 && (
+                    <span className="text-xs font-medium text-amber-700 bg-amber-100/80 px-1.5 py-0.5 rounded-full">
+                      +{candlesCount - 5}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <MiniFlame unlit />
+              )}
+            </div>
+
+            {/* Row 2: centered candle count headline */}
             <p
-              className="text-[13px] text-[#4A4038] leading-snug"
+              className="text-[13px] text-[#4A4038] leading-snug text-center"
               style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
             >
               {tributeHeadline}
             </p>
+
+            {/* Row 3: centered active-until subtitle */}
+            <p className="mt-0.5 text-[11px] text-[#8A7A6E] text-center">{tributeSubline}</p>
           </div>
-          <p className="mt-0.5 text-[11px] text-[#8A7A6E]">{tributeSubline}</p>
 
           {parsedMemorial?.isBanned ? (
             <div className="mt-3 w-full text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200">

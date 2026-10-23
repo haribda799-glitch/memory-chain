@@ -70,7 +70,9 @@ function resolveMockUrl(txId) {
   let stored = mockMemoryStore.get(txId);
   if (!stored && typeof window !== 'undefined' && window.localStorage) {
     try {
-      stored = window.localStorage.getItem(`${MOCK_STORAGE_PREFIX}${txId}`);
+      stored =
+        window.localStorage.getItem(`${MOCK_STORAGE_PREFIX}${txId}`) ||
+        window.localStorage.getItem(`${MOCK_STORAGE_PREFIX}text_${txId}`);
     } catch {
       stored = null;
     }
@@ -288,6 +290,16 @@ export async function uploadJsonToArweave(metadata) {
     const storageKey = `${MOCK_STORAGE_PREFIX}${mockTxId}`;
     let json = JSON.stringify(metadata);
     mockMemoryStore.set(mockTxId, json);
+
+    // Always persist lightweight text-only backup first (~300 bytes) so user epitaph is never lost to image quota
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const textOnly = JSON.stringify({ ...metadata, image: '' });
+        window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}text_${mockTxId}`, textOnly);
+      } catch {
+        // ignore
+      }
+    }
     try {
       window.localStorage.setItem(storageKey, json);
     } catch (err) {
@@ -410,11 +422,12 @@ export function buildNftMetadata({
     cleanUserEpitaph ||
     `In loving memory of ${petName}. Forever on the blockchain.`;
 
-  if (typeof window !== 'undefined' && window.localStorage && petName) {
+  // Persist custom user-entered epitaph so it always takes priority over generic fallback
+  if (typeof window !== 'undefined' && window.localStorage && petName && cleanUserEpitaph) {
     try {
       window.localStorage.setItem(
         `mc_epitaph_${String(petName).trim().toLowerCase()}`,
-        finalEpitaph
+        cleanUserEpitaph
       );
     } catch {
       // ignore storage quota errors
@@ -424,13 +437,15 @@ export function buildNftMetadata({
   const metadata = {
     name: `Memorial: ${petName}`,
     description: finalEpitaph,
-    epitaph: finalEpitaph,
+    epitaph: cleanUserEpitaph || finalEpitaph,
+    ...(cleanUserEpitaph ? { bio: cleanUserEpitaph } : {}),
     image: imageUrl,
     external_url: '',
     ...(resolvedBirthYear   ? { birth_year:   resolvedBirthYear   } : {}),
     ...(resolvedPassingYear ? { passing_year: resolvedPassingYear } : {}),
     attributes: [
       { trait_type: 'Pet Name', value: petName },
+      ...(cleanUserEpitaph ? [{ trait_type: 'Epitaph', value: cleanUserEpitaph }] : []),
       ...(species ? [{ trait_type: 'Species', value: species }] : []),
       ...(breed   ? [{ trait_type: 'Breed',   value: breed   }] : []),
       ...(resolvedBirthYear

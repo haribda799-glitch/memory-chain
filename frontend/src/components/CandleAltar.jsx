@@ -1,17 +1,3 @@
-import { useId } from 'react';
-
-/**
- * CandleAltar — Pure on-chain sacred collective flame & memorial counter component.
- *
- * Rules:
- * - If isBurning && totalCandles > 0:
- *   * Math.min(totalCandles, 7) glowing flame icons.
- *   * If totalCandles > 7: `+{totalCandles - 7} more`
- *   * Subtitle: `{totalCandles} {totalCandles === 1 ? 'candle' : 'candles'} burning together in loving memory`
- * - If !isBurning:
- *   * Delicate extinguished silhouette.
- *   * Subtitle: `The flame has rested · {totalCandles} {totalCandles === 1 ? 'candle' : 'candles'} lit in loving memory`
- */
 export default function CandleAltar({
   memorial,
   totalCandles: propTotalCandles,
@@ -19,7 +5,6 @@ export default function CandleAltar({
   isBurning: propIsBurning,
   className = '',
 }) {
-  const uid = useId().replace(/:/g, '');
   const now = Math.floor(Date.now() / 1000);
 
   const expiresAt = Number(memorial?.candle_expires_at ?? propExpiryTimestamp ?? 0);
@@ -45,7 +30,7 @@ export default function CandleAltar({
                 <svg
                   width="14"
                   height="20"
-                  viewBox="0 0 15 22"
+                  viewBox="0 0 22 30"
                   fill="none"
                   xmlns="http://www.w3.org/2000/svg"
                   className="animate-[flameFloat_3s_ease-in-out_infinite]"
@@ -55,13 +40,16 @@ export default function CandleAltar({
                   }}
                 >
                   <path
-                    d="M7.5 0C7.5 0 1.5 7.5 1.5 13C1.5 16.5 4.2 19.5 7.5 19.5C10.8 19.5 13.5 16.5 13.5 13C13.5 7.5 7.5 0 7.5 0Z"
-                    fill={`url(#altarFlameGrad_${uid})`}
+                    d="M12.2 1.2C14.9 5.9 19.2 12.4 19.2 19.1C19.2 24.3 15.6 28.2 11 28.2C6.4 28.2 2.8 24.3 2.8 19.1C2.8 12.1 8.1 6.6 12.2 1.2Z"
+                    fill="#F59E0B"
                   />
                   <path
-                    d="M7.5 7C7.5 7 4.5 11 4.5 13.5C4.5 15.2 5.8 16.5 7.5 16.5C9.2 16.5 10.5 15.2 10.5 13.5C10.5 11 7.5 7 7.5 7Z"
+                    d="M11.6 6.4C13.7 10.2 16.6 14.9 16.6 19.9C16.6 23.9 14.2 27.0 11 27.0C7.8 27.0 5.4 23.9 5.4 19.9C5.4 14.6 9.1 10.6 11.6 6.4Z"
+                    fill="#FBBF24"
+                  />
+                  <path
+                    d="M11 15.0C12.3 17.4 13.6 20.0 13.6 22.6C13.6 24.9 12.5 26.5 11 26.5C9.5 26.5 8.4 24.9 8.4 22.6C8.4 20.0 9.7 17.4 11 15.0Z"
                     fill="#FEF3C7"
-                    opacity="0.85"
                   />
                 </svg>
               </span>
@@ -117,17 +105,6 @@ export default function CandleAltar({
           </span>
         </div>
       )}
-
-      {/* Shared Gradient Defs */}
-      <svg width="0" height="0" className="absolute pointer-events-none">
-        <defs>
-          <linearGradient id={`altarFlameGrad_${uid}`} x1="7.5" y1="0" x2="7.5" y2="20" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#FDE68A" />
-            <stop offset="0.45" stopColor="#F59E0B" />
-            <stop offset="1" stopColor="#B45309" />
-          </linearGradient>
-        </defs>
-      </svg>
 
       <style>{`
         @keyframes flameFloat {
