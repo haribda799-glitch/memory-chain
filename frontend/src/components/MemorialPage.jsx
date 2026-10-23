@@ -31,6 +31,30 @@ const cleanTrait = (value) => {
   return EMPTY_TRAIT_VALUES.has(text.toLowerCase()) ? '' : text;
 };
 
+/**
+ * Human-friendly flame expiry label.
+ *  - < 24h left: "Oct 23, 16:14 (48m left)" (exact time + remaining hours/minutes)
+ *  - >= 24h left: "Oct 25, 2026, 15:00"
+ * 24-hour clock (`h23`) avoids the "24:00" quirk of `hour12: false`.
+ */
+function formatFlameExpiry(expiresAtSec, nowSec) {
+  const expiresMs = Number(expiresAtSec) * 1000;
+  if (!Number.isFinite(expiresMs) || expiresMs <= 0) return '';
+  const secondsLeft = Math.max(0, Number(expiresAtSec) - nowSec);
+  const timeOpts = { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  const expiryDate = new Date(expiresMs);
+
+  if (secondsLeft >= 86400) {
+    return expiryDate.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', ...timeOpts });
+  }
+
+  const hours = Math.floor(secondsLeft / 3600);
+  const minutes = Math.floor((secondsLeft % 3600) / 60);
+  const left = hours > 0 ? `${hours}h ${minutes}m left` : minutes > 0 ? `${minutes}m left` : '<1m left';
+  const when = expiryDate.toLocaleString('en-US', { month: 'short', day: 'numeric', ...timeOpts });
+  return `${when} (${left})`;
+}
+
 /** Multi-layer solid filled candle flame tongue inside the arch base medallion (no hollow center). */
 function MedallionFlame() {
   return (
@@ -216,7 +240,20 @@ export default function MemorialPage() {
     address: contractAddress, abi: CONTRACT_ABI, functionName: 'total_candles_lit', args: [tokenId],
   });
 
-  const now = Math.floor(Date.now() / 1000);
+  // Live clock: re-rendering on every tick is what lets an expired flame go out without a manual page reload.
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const tick = () => setNow(Math.floor(Date.now() / 1000));
+    const interval = setInterval(tick, 15000);
+    // Browsers heavily throttle timers in background tabs — resync immediately when the user returns.
+    const onVisible = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
   const onchainExpiresAt = Number(candleExpiryRaw ?? parsedMemorial?.candle_expires_at ?? parsedMemorial?.candleExpiresAt ?? 0);
   const onchainTotal = Number(totalCandlesRaw ?? parsedMemorial?.total_candles_lit ?? parsedMemorial?.totalCandles ?? 0);
 
@@ -282,6 +319,20 @@ export default function MemorialPage() {
     : onchainExpiresAt;
   const expiryTimestamp = candleExpiresAt;
   const isBurning = candleExpiresAt > now;
+
+  // Exact-moment extinguish: besides the 15s ticker, schedule a one-shot timer for the expiry second
+  // so the flame goes out right when the time runs out rather than up to 15s later.
+  useEffect(() => {
+    if (!(candleExpiresAt > 0)) return undefined;
+    const msLeft = (candleExpiresAt - Math.floor(Date.now() / 1000)) * 1000;
+    if (msLeft <= 0) return undefined;
+    // setTimeout overflows above ~24.8 days; the 15s ticker covers anything longer.
+    const timeout = setTimeout(
+      () => setNow(Math.floor(Date.now() / 1000)),
+      Math.min(msLeft + 500, 2147483647)
+    );
+    return () => clearTimeout(timeout);
+  }, [candleExpiresAt]);
 
   const handleCandleLit = (tierOrDuration = 1) => {
     const currentNow = Math.floor(Date.now() / 1000);
@@ -417,12 +468,6 @@ export default function MemorialPage() {
     Boolean(metadata?.isTemporaryStoragePlaceholder) ||
     rawDescCheck.startsWith('This memorial was created on testnet with temporary storage');
 
-  const formatDate = (val) => {
-    if (!val) return null;
-    const ms = typeof val === 'number' && val < 1e12 ? val * 1000 : Number(val);
-    return new Date(ms).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  };
-
   const birthDate    = findAttr('Birth Date');
   const memorialDate = findAttr('Memorial Date');
   // Placeholder answers ("no", "none", "n/a", ...) are filtered out entirely
@@ -460,7 +505,7 @@ export default function MemorialPage() {
       ? `${candlesCount} ${candleWord} lit in loving memory`
       : 'Be the first to light a candle';
   const tributeSubline = isBurning
-    ? `Flame active until ${formatDate(candleExpiresAt)}`
+    ? `Flame active until ${formatFlameExpiry(candleExpiresAt, now)}`
     : 'The flame is resting';
 
   return (
@@ -634,7 +679,7 @@ export default function MemorialPage() {
 
               <div className="mt-1.5 md:mt-3 bg-[#F5efe6]/80 px-3 py-0.5 md:px-4 md:py-1.5 rounded-full border border-[#E9dfd3]/80">
                 <p className="text-[11px] md:text-xs text-[#5A5047]">
-                  The flame burns until <span className="font-semibold">{formatDate(candleExpiresAt)}</span>
+                  The flame burns until <span className="font-semibold">{formatFlameExpiry(candleExpiresAt, now)}</span>
                 </p>
               </div>
 
