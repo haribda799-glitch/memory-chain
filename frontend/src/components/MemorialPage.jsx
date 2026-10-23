@@ -5,8 +5,6 @@ import { useState, useEffect, useRef } from 'react';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
 import { getArweaveUrl, isMockTxId, TESTNET_TEMPORARY_STORAGE_NOTICE } from '../utils/arweave';
-import Candle from './Candle';
-import CandleAltar from './CandleAltar';
 import LightCandleModal from './LightCandleModal';
 import ReportModal from './ReportModal';
 import ShareModal from './ShareModal';
@@ -541,295 +539,224 @@ export default function MemorialPage() {
           </div>
         )}
 
-        {/* Memorial Arch Portrait, Altar Flame & Header (Mobile: order-1, Desktop: order-1) */}
-        <div className="order-1 md:order-1 flex flex-col items-center text-center w-full max-w-2xl mx-auto md:mb-4">
-          {/* Double-framed classic memorial arch */}
-          <div
-            className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] md:h-80 aspect-[4/5] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
-            style={{ borderRadius: ARCH_OUTER_RADIUS }}
-          >
-            <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: ARCH_INNER_RADIUS }}>
-              <img
-                alt={petName ? `Memorial for ${petName}` : 'Pet portrait'}
-                className="w-full h-full object-cover"
-                src={imageUrl || FALLBACK_PORTRAIT}
-                onError={(e) => { e.currentTarget.src = FALLBACK_PORTRAIT; }}
-              />
-              {/* Warm bottom-up vignette so the altar flame reads with depth */}
-              <div
-                aria-hidden="true"
-                className="absolute inset-0 bg-gradient-to-t from-amber-950/35 via-transparent to-transparent pointer-events-none"
-              />
-            </div>
-          </div>
+        {/*
+          ── Memorial Diptych ─────────────────────────────────────────────
+          Mobile (< md): the chapel card and both column wrappers are transparent.
+          Column wrappers use `display: contents`, so every block becomes a direct
+          flex item of the inner stack and `order-*` keeps the mobile sequence:
+            1 Arch + medallion → 2 Name & dates → 3 Compact tribute → 4 Epitaph → 5 Provenance & actions
+          Desktop (>= md): the card becomes a 12-column chapel album.
+            Left (5/12): Arch + medallion, then Provenance & Share/Report.
+            Right (7/12): Name & dates, compact tribute, epitaph.
+          A single DOM tree is used for both layouts, so no block is ever duplicated.
+        */}
+        <div className="w-full max-w-2xl mx-auto md:max-w-4xl lg:max-w-5xl md:bg-[#FDFBF7]/90 md:border md:border-amber-900/10 md:rounded-[36px] md:p-8 lg:p-12 md:shadow-[0_20px_60px_rgba(120,80,40,0.06)]">
+          <div className="flex flex-col items-center gap-3 sm:gap-4 md:grid md:grid-cols-12 md:gap-8 lg:gap-12 md:items-start">
 
-          {/* High-contrast medallion candle holder at the base of the arch */}
-          {isBurning ? (
-            <div
-              className="w-12 h-12 rounded-full bg-[#FFFDF9] border-2 border-amber-400/80 shadow-[0_4px_20px_rgba(245,158,11,0.45)] flex items-center justify-center -mt-6 z-10 relative animate-[medallionPulse_3s_ease-in-out_infinite]"
-              title={`Candle burning for ${petName || 'this beloved companion'}`}
-            >
-              <div
-                aria-hidden="true"
-                className="absolute -inset-2.5 bg-amber-400/25 blur-lg rounded-full pointer-events-none"
-              />
-              <MedallionFlame />
-            </div>
-          ) : (
-            <div
-              className="w-11 h-11 rounded-full bg-[#FFFDF9] border border-amber-900/15 shadow-sm flex items-center justify-center -mt-5 z-10 relative"
-              title="The flame is resting"
-            >
-              <span className="material-symbols-outlined text-xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
-            </div>
-          )}
+            {/* ── Left column (desktop only wrapper) ───────────────────────── */}
+            <div className="contents md:flex md:flex-col md:items-center md:col-span-5">
 
-          <h1
-            className="mt-2 text-3xl sm:text-4xl md:text-display-lg font-serif tracking-wide md:tracking-normal text-[#2C2520] leading-tight"
-            style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
-          >
-            {petName}
-          </h1>
-          <p className="mt-1 md:mt-2 text-[13px] md:text-sm text-[#6B5E54] tracking-wide">
-            {lineage}
-            {dateDisplay && (
-              <>
-                <span className="mx-2 text-amber-600/70" aria-hidden="true">•</span>
-                {dateDisplay}
-              </>
-            )}
-          </p>
-        </div>
-
-        {/* ── Compact Tribute Box (Mobile only: order-2) ──────────── */}
-        <section
-          aria-label="Candle tribute"
-          className="order-2 md:hidden mt-1 px-4 py-3.5 rounded-2xl bg-amber-50/70 border border-amber-900/10 max-w-sm w-full mx-auto flex flex-col items-center text-center"
-        >
-          <div className="flex flex-col items-center w-full">
-            {/* Row 1: centered row of up to 5 mini-flame icons (+N badge if > 5) */}
-            <div className="flex items-center justify-center gap-1.5 mb-1.5">
-              {isBurning && candlesCount > 0 ? (
-                <>
-                  {Array.from({ length: Math.min(candlesCount, 5) }).map((_, i) => (
-                    <MiniFlame key={i} delay={i * 0.35} />
-                  ))}
-                  {candlesCount > 5 && (
-                    <span className="text-xs font-medium text-amber-700 bg-amber-100/80 px-1.5 py-0.5 rounded-full">
-                      +{candlesCount - 5}
-                    </span>
-                  )}
-                </>
-              ) : (
-                <MiniFlame unlit />
-              )}
-            </div>
-
-            {/* Row 2: centered candle count headline */}
-            <p
-              className="text-[13px] text-[#4A4038] leading-snug text-center"
-              style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
-            >
-              {tributeHeadline}
-            </p>
-
-            {/* Row 3: centered active-until subtitle */}
-            <p className="mt-0.5 text-[11px] text-[#8A7A6E] text-center">{tributeSubline}</p>
-          </div>
-
-          {parsedMemorial?.isBanned ? (
-            <div className="mt-3 w-full text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200">
-              🔒 Candle lighting is disabled for suspended memorials.
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={handleIgniteClick}
-              className="mt-3 w-full bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white py-2.5 rounded-xl font-bold text-xs uppercase tracking-widest shadow-[0_4px_14px_rgba(192,122,93,0.3)] active:scale-[0.98] transition-transform cursor-pointer"
-            >
-              {isBurning ? 'Keep the Flame Alive' : 'Light a Candle'}
-            </button>
-          )}
-        </section>
-
-        {/* ── Sacred Flame Alcove & Collective Altar (Desktop only: order-3) ──────────── */}
-        <div className="hidden md:flex md:order-3 w-full max-w-md mx-auto md:mb-10 flex-col items-center">
-          {isBurning ? (
-            <div
-              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-3.5 sm:px-5 sm:py-4 md:px-6 md:py-6 flex flex-col items-center animate-[alcoveBreath_5s_ease-in-out_infinite]"
-              style={{
-                background: 'radial-gradient(circle at 50% 32%, rgba(251,191,36,0.22) 0%, rgba(245,158,11,0.08) 42%, rgba(250,247,242,0) 72%)',
-                border: '1px solid rgba(245,158,11,0.28)',
-                boxShadow: '0 0 28px rgba(245,158,11,0.2), inset 0 0 16px rgba(245,158,11,0.08)',
-              }}
-            >
-              {/* Central flame enlarged with warm radiant diffusion */}
-              <div className="relative flex items-center justify-center -my-1.5 sm:-my-1 md:my-1 transform scale-95 sm:scale-105 md:scale-125">
+              {/* Memorial Arch Portrait & Altar Medallion (Mobile: order-1) */}
+              <div className="order-1 flex flex-col items-center text-center w-full">
+                {/* Double-framed classic memorial arch */}
                 <div
-                  className="absolute w-20 h-20 md:w-24 md:h-24 rounded-full pointer-events-none"
-                  style={{
-                    background: 'radial-gradient(circle, rgba(251,191,36,0.45) 0%, rgba(245,158,11,0.2) 45%, transparent 70%)',
-                    filter: 'blur(6px)',
-                  }}
-                />
-                <Candle petName={petName} showCaption={false} />
-              </div>
-
-              <p
-                className="mt-0.5 md:mt-1 text-xs md:text-sm text-[#8A7A6E] italic text-center leading-snug"
-                style={{ fontFamily: "'Libre Caslon Text', 'Georgia', serif" }}
-              >
-                This candle is burning for {petName || 'this beautiful soul'}.
-              </p>
-
-              <div className="mt-1.5 md:mt-3 bg-[#F5efe6]/80 px-3 py-0.5 md:px-4 md:py-1.5 rounded-full border border-[#E9dfd3]/80">
-                <p className="text-[11px] md:text-xs text-[#5A5047]">
-                  The flame burns until <span className="font-semibold">{formatFlameExpiry(candleExpiresAt, now)}</span>
-                </p>
-              </div>
-
-              {parsedMemorial?.isBanned ? (
-                <div className="mt-2.5 md:mt-4 text-center p-2.5 md:p-3 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 shadow-sm w-full max-w-xs">
-                  🔒 Candle lighting is disabled for suspended memorials.
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleIgniteClick}
-                  className="mt-2.5 md:mt-4 w-full max-w-xs bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white px-5 py-2.5 md:px-6 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm uppercase tracking-widest hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                  className={`relative h-[min(18rem,40vh)] sm:h-[min(20rem,44vh)] aspect-[4/5] md:w-64 md:h-80 lg:w-72 lg:h-[340px] p-1.5 bg-gradient-to-b from-amber-200/50 via-amber-100/20 to-amber-500/30 border border-amber-500/35 transition-shadow duration-700 ${archGlowClass}`}
+                  style={{ borderRadius: ARCH_OUTER_RADIUS }}
                 >
-                  Keep the Flame Alive
-                </button>
-              )}
-
-              {/* ── Integrated Collective Altar ──────────────────── */}
-              <div className="w-full border-t border-amber-900/10 mt-2.5 md:mt-4 pt-2 md:pt-3">
-                <CandleAltar totalCandles={totalCandles} expiryTimestamp={expiryTimestamp} isBurning={true} />
-              </div>
-            </div>
-          ) : (
-            <div
-              className="relative w-full rounded-2xl md:rounded-3xl px-4 py-3.5 sm:px-5 sm:py-4 md:px-6 md:py-6 flex flex-col items-center"
-              style={{
-                background: 'radial-gradient(circle at 50% 32%, rgba(200,180,160,0.12) 0%, rgba(250,247,242,0) 70%)',
-                border: '1px solid rgba(180,160,140,0.2)',
-              }}
-            >
-              <div className="w-9 h-9 md:w-14 md:h-14 rounded-full bg-[#F5efe6] flex items-center justify-center mb-1.5 md:mb-3">
-                <span className="material-symbols-outlined text-lg md:text-2xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
-              </div>
-              <h3
-                className="text-base md:text-lg text-[#2C2520] mb-0.5 md:mb-1"
-                style={{ fontFamily: "'Libre Caslon Text', serif" }}
-              >
-                The Flame Has Faded
-              </h3>
-              <p className="text-[11px] md:text-xs text-[#8A7A6E] max-w-xs text-center leading-snug mb-2.5 md:mb-4">
-                Light a virtual candle to keep {petName}&apos;s memory shining brightly.
-              </p>
-
-              {parsedMemorial?.isBanned ? (
-                <div className="text-center p-2.5 md:p-3 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 shadow-sm w-full max-w-xs">
-                  🔒 Candle lighting is disabled for suspended memorials.
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleIgniteClick}
-                  className="w-full max-w-xs bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white px-5 py-2.5 md:px-6 md:py-3.5 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm uppercase tracking-widest hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-                >
-                  Ignite Memory
-                </button>
-              )}
-
-              {/* ── Integrated Collective Altar ──────────────────── */}
-              <div className="w-full border-t border-amber-900/10 mt-2.5 md:mt-4 pt-2 md:pt-3">
-                <CandleAltar totalCandles={totalCandles} expiryTimestamp={0} isBurning={false} />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Bio / Memory Narrative (Mobile: order-3, Desktop: order-2) */}
-        {description && (
-          <div className="order-3 md:order-2 w-full max-w-2xl mx-auto bg-surface p-5 sm:p-6 md:p-10 rounded-[20px] md:rounded-[24px] border border-outline-variant/20 shadow-sm text-center mb-3 md:mb-6">
-            <div
-              className="text-4xl md:text-6xl leading-none text-[#d8c2ba] opacity-70 select-none mb-0.5 md:mb-1"
-              style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
-              aria-hidden="true"
-            >
-              &ldquo;
-            </div>
-            <p className="font-body-lg text-sm sm:text-base md:text-body-lg text-on-surface leading-relaxed italic" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
-              {description}
-            </p>
-          </div>
-        )}
-
-        {/* Footer Actions (Mobile: order-4, Desktop: order-4) */}
-        <div className="order-4 md:order-4 w-full max-w-2xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6 pt-6 md:pt-8 border-t border-outline-variant/20">
-          <div className="flex items-start space-x-3 text-left">
-            <div className="mt-1">
-              <span className="material-symbols-outlined text-primary">link</span>
-            </div>
-            <div>
-              <p className="font-label-md text-label-md text-primary uppercase tracking-wider mb-1">Eternal Provenance</p>
-              <p className="font-body-sm text-body-sm text-[#5A5047]">Secured forever on Arweave network.</p>
-              {arweaveTxId && (
-                <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
-                  Decentralized Ledger ID: <a href={getArweaveUrl(arweaveTxId)} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{arweaveTxId.slice(0, 10)}…{arweaveTxId.slice(-6)}</a>
-                </p>
-              )}
-              {owner && (
-                <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
-                  Owner: <a href={`${explorerUrl}/address/${owner}`} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{owner.slice(0, 8)}…{owner.slice(-6)}</a>
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-6">
-            <button
-              type="button"
-              onClick={handleShare}
-              className="flex flex-col items-center group cursor-pointer border-0 bg-transparent outline-none"
-            >
-              <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
-                <span className="material-symbols-outlined text-3xl text-[#5A5047] group-hover:text-[#8a4f36] transition-colors">share</span>
-              </div>
-              <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">Share</span>
-            </button>
-
-            {!isOwner && (
-              isReported ? (
-                <div className="flex flex-col items-center cursor-default opacity-80" title="You have reported this memorial">
-                  <div className="w-16 h-16 bg-[#f0ede8] p-1 rounded-[16px] border border-[#d8c2ba] shadow-sm flex items-center justify-center text-[#8a7a6e]">
-                    <span className="material-symbols-outlined text-3xl">check</span>
+                  <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: ARCH_INNER_RADIUS }}>
+                    <img
+                      alt={petName ? `Memorial for ${petName}` : 'Pet portrait'}
+                      className="w-full h-full object-cover"
+                      src={imageUrl || FALLBACK_PORTRAIT}
+                      onError={(e) => { e.currentTarget.src = FALLBACK_PORTRAIT; }}
+                    />
+                    {/* Warm bottom-up vignette so the altar flame reads with depth */}
+                    <div
+                      aria-hidden="true"
+                      className="absolute inset-0 bg-gradient-to-t from-amber-950/35 via-transparent to-transparent pointer-events-none"
+                    />
                   </div>
-                  <span className="font-label-md text-label-md text-[#8a7a6e] mt-2 uppercase tracking-wider text-xs">
-                    Reported
-                  </span>
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (parsedMemorial?.isBanned) return;
-                    setShowReportModal(true);
-                  }}
-                  disabled={parsedMemorial?.isBanned}
-                  title={parsedMemorial?.isBanned ? 'Memorial is already banned' : 'Report memorial'}
-                  className={`flex flex-col items-center group border-0 bg-transparent outline-none ${parsedMemorial?.isBanned ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-                >
-                  <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
-                    <span className="material-symbols-outlined text-3xl text-amber-700 group-hover:text-amber-800 transition-colors">flag</span>
+
+                {/* High-contrast medallion candle holder at the base of the arch */}
+                {isBurning ? (
+                  <div
+                    className="w-12 h-12 rounded-full bg-[#FFFDF9] border-2 border-amber-400/80 shadow-[0_4px_20px_rgba(245,158,11,0.45)] flex items-center justify-center -mt-6 z-10 relative animate-[medallionPulse_3s_ease-in-out_infinite]"
+                    title={`Candle burning for ${petName || 'this beloved companion'}`}
+                  >
+                    <div
+                      aria-hidden="true"
+                      className="absolute -inset-2.5 bg-amber-400/25 blur-lg rounded-full pointer-events-none"
+                    />
+                    <MedallionFlame />
                   </div>
-                  <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">
-                    {parsedMemorial?.isBanned ? 'Banned' : 'Report'}
-                  </span>
-                </button>
-              )
-            )}
+                ) : (
+                  <div
+                    className="w-11 h-11 rounded-full bg-[#FFFDF9] border border-amber-900/15 shadow-sm flex items-center justify-center -mt-5 z-10 relative"
+                    title="The flame is resting"
+                  >
+                    <span className="material-symbols-outlined text-xl text-[#b5a79a]" style={{ fontVariationSettings: "'FILL' 0" }}>local_fire_department</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Eternal Provenance & Share/Report (Mobile: order-5, last; Desktop: under the arch) */}
+              <div className="order-5 w-full max-w-2xl mx-auto flex flex-col items-center justify-between gap-6 pt-6 border-t border-outline-variant/20 md:mt-8 md:gap-5">
+                <div className="flex items-start space-x-3 text-left">
+                  <div className="mt-1">
+                    <span className="material-symbols-outlined text-primary">link</span>
+                  </div>
+                  <div>
+                    <p className="font-label-md text-label-md text-primary uppercase tracking-wider mb-1">Eternal Provenance</p>
+                    <p className="font-body-sm text-body-sm text-[#5A5047]">Secured forever on Arweave network.</p>
+                    {arweaveTxId && (
+                      <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
+                        Decentralized Ledger ID: <a href={getArweaveUrl(arweaveTxId)} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{arweaveTxId.slice(0, 10)}…{arweaveTxId.slice(-6)}</a>
+                      </p>
+                    )}
+                    {owner && (
+                      <p className="font-body-sm text-body-sm text-[#5A5047] font-mono mt-1 text-xs">
+                        Owner: <a href={`${explorerUrl}/address/${owner}`} target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">{owner.slice(0, 8)}…{owner.slice(-6)}</a>
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-6">
+                  <button
+                    type="button"
+                    onClick={handleShare}
+                    className="flex flex-col items-center group cursor-pointer border-0 bg-transparent outline-none"
+                  >
+                    <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
+                      <span className="material-symbols-outlined text-3xl text-[#5A5047] group-hover:text-[#8a4f36] transition-colors">share</span>
+                    </div>
+                    <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">Share</span>
+                  </button>
+
+                  {!isOwner && (
+                    isReported ? (
+                      <div className="flex flex-col items-center cursor-default opacity-80" title="You have reported this memorial">
+                        <div className="w-16 h-16 bg-[#f0ede8] p-1 rounded-[16px] border border-[#d8c2ba] shadow-sm flex items-center justify-center text-[#8a7a6e]">
+                          <span className="material-symbols-outlined text-3xl">check</span>
+                        </div>
+                        <span className="font-label-md text-label-md text-[#8a7a6e] mt-2 uppercase tracking-wider text-xs">
+                          Reported
+                        </span>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (parsedMemorial?.isBanned) return;
+                          setShowReportModal(true);
+                        }}
+                        disabled={parsedMemorial?.isBanned}
+                        title={parsedMemorial?.isBanned ? 'Memorial is already banned' : 'Report memorial'}
+                        className={`flex flex-col items-center group border-0 bg-transparent outline-none ${parsedMemorial?.isBanned ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                      >
+                        <div className="w-16 h-16 bg-[#F5efe6] p-1 rounded-[16px] border border-[#E9dfd3] shadow-sm flex items-center justify-center group-hover:bg-[#ebdcd0] transition-colors">
+                          <span className="material-symbols-outlined text-3xl text-amber-700 group-hover:text-amber-800 transition-colors">flag</span>
+                        </div>
+                        <span className="font-label-md text-label-md text-[#5A5047] group-hover:text-[#8a4f36] mt-2 uppercase tracking-wider transition-colors text-xs">
+                          {parsedMemorial?.isBanned ? 'Banned' : 'Report'}
+                        </span>
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Right column (desktop only wrapper) ──────────────────────── */}
+            <div className="contents md:flex md:flex-col md:items-stretch md:justify-center md:col-span-7 md:w-full md:pt-2 lg:pt-4">
+
+              {/* Name & Dates (Mobile: order-2, glued under the medallion by cancelling the stack gap) */}
+              <div className="order-2 -mt-3 sm:-mt-4 md:mt-0 flex flex-col items-center md:items-start text-center md:text-left w-full max-w-2xl mx-auto md:mx-0 md:max-w-none">
+                <h1
+                  className="mt-2 md:mt-0 text-3xl sm:text-4xl md:text-4xl lg:text-5xl font-serif tracking-wide md:tracking-normal text-[#2C2520] leading-tight"
+                  style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+                >
+                  {petName}
+                </h1>
+                <p className="mt-1 md:mt-2 text-[13px] md:text-sm text-[#6B5E54] tracking-wide text-center md:text-left">
+                  {lineage}
+                  {dateDisplay && (
+                    <>
+                      <span className="mx-2 text-amber-600/70" aria-hidden="true">•</span>
+                      {dateDisplay}
+                    </>
+                  )}
+                </p>
+              </div>
+
+              {/* ── Unified Compact Tribute Box (Mobile: order-3; Desktop: under the name) ── */}
+              <section
+                aria-label="Candle tribute"
+                className="order-3 mt-1 md:mt-5 px-4 py-3.5 md:px-6 md:py-5 rounded-2xl bg-amber-50/70 border border-amber-900/10 max-w-sm md:max-w-none w-full mx-auto flex flex-col items-center text-center"
+              >
+                <div className="flex flex-col items-center w-full">
+                  {/* Row 1: centered row of up to 5 mini-flame icons (+N badge if > 5) */}
+                  <div className="flex items-center justify-center gap-1.5 mb-1.5">
+                    {isBurning && candlesCount > 0 ? (
+                      <>
+                        {Array.from({ length: Math.min(candlesCount, 5) }).map((_, i) => (
+                          <MiniFlame key={i} delay={i * 0.35} />
+                        ))}
+                        {candlesCount > 5 && (
+                          <span className="text-xs font-medium text-amber-700 bg-amber-100/80 px-1.5 py-0.5 rounded-full">
+                            +{candlesCount - 5}
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <MiniFlame unlit />
+                    )}
+                  </div>
+
+                  {/* Row 2: centered candle count headline */}
+                  <p
+                    className="text-[13px] md:text-[15px] text-[#4A4038] leading-snug text-center"
+                    style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+                  >
+                    {tributeHeadline}
+                  </p>
+
+                  {/* Row 3: centered active-until subtitle */}
+                  <p className="mt-0.5 text-[11px] md:text-xs text-[#8A7A6E] text-center">{tributeSubline}</p>
+                </div>
+
+                {parsedMemorial?.isBanned ? (
+                  <div className="mt-3 w-full md:max-w-xs text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200">
+                    🔒 Candle lighting is disabled for suspended memorials.
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleIgniteClick}
+                    className="mt-3 md:mt-4 w-full md:max-w-xs bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white py-2.5 md:py-3 rounded-xl font-bold text-xs uppercase tracking-widest shadow-[0_4px_14px_rgba(192,122,93,0.3)] md:hover:shadow-[0_6px_20px_rgba(192,122,93,0.4)] md:hover:scale-[1.02] active:scale-[0.98] transition-transform cursor-pointer"
+                  >
+                    {isBurning ? 'Keep the Flame Alive' : 'Light a Candle'}
+                  </button>
+                )}
+              </section>
+
+              {/* Bio / Memory Narrative (Mobile: order-4; Desktop: under the tribute box) */}
+              {description && (
+                <div className="order-4 md:mt-5 w-full max-w-2xl mx-auto md:max-w-none bg-surface p-5 sm:p-6 md:p-8 rounded-[20px] md:rounded-[24px] border border-outline-variant/20 shadow-sm text-center mb-3 md:mb-0">
+                  <div
+                    className="text-4xl md:text-5xl leading-none text-[#d8c2ba] opacity-70 select-none mb-0.5 md:mb-1"
+                    style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+                    aria-hidden="true"
+                  >
+                    &ldquo;
+                  </div>
+                  <p className="font-body-lg text-sm sm:text-base md:text-body-lg text-on-surface leading-relaxed italic" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                    {description}
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -882,16 +809,6 @@ export default function MemorialPage() {
         @keyframes pulse-shadow {
           0%, 100% { box-shadow: 0 0 20px 5px rgba(251, 146, 60, 0.1); }
           50% { box-shadow: 0 0 35px 10px rgba(251, 146, 60, 0.25); }
-        }
-        @keyframes alcoveBreath {
-          0%, 100% {
-            box-shadow: 0 0 25px rgba(245, 158, 11, 0.18), inset 0 0 15px rgba(245, 158, 11, 0.06);
-            border-color: rgba(245, 158, 11, 0.22);
-          }
-          50% {
-            box-shadow: 0 0 35px rgba(245, 158, 11, 0.32), inset 0 0 22px rgba(245, 158, 11, 0.12);
-            border-color: rgba(245, 158, 11, 0.38);
-          }
         }
         @keyframes flameFloat {
           0%, 100% {
