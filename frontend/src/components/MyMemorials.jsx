@@ -15,6 +15,7 @@ import MemorialCard from './MemorialCard';
 import { useMemorials } from '../utils/useMemorials';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
+import { useNow } from '../hooks/useNow';
 
 function SkeletonCard() {
   return (
@@ -38,7 +39,7 @@ function SkeletonCard() {
   );
 }
 
-function MyMemorialItem({ mem, onRefetch, onUpdateMemorial }) {
+function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
   const chainId = useChainId();
   const contractAddress = getContractAddress(chainId);
   const publicClient = usePublicClient();
@@ -184,6 +185,7 @@ function MyMemorialItem({ mem, onRefetch, onUpdateMemorial }) {
       onUpdate={onRefetch}
       candleExpiresAt={candleExpiresAt}
       totalCandlesLit={totalCandlesLit}
+      now={now}
     />
   );
 }
@@ -206,6 +208,10 @@ export default function MyMemorials() {
   const isConnected = (authenticated || isWagmiConnected) && Boolean(address);
 
   const { memorials: allMemorials, isLoading, refetch, updateMemorial } = useMemorials();
+
+  // Single shared clock for every card in the list (expired candles go out in real time).
+  // Must stay above the early returns below to keep hook order stable.
+  const now = useNow();
 
   // Defensive filtering for user's memorials
   const userMemorials = useMemo(() => {
@@ -295,6 +301,7 @@ export default function MyMemorials() {
             <MyMemorialItem
               key={mem.tokenId}
               mem={mem}
+              now={now}
               onRefetch={refetch}
               onUpdateMemorial={updateMemorial}
             />

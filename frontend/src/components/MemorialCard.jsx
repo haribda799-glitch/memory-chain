@@ -5,6 +5,7 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { getArweaveUrl } from '../utils/arweave';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
+import { useNow } from '../hooks/useNow';
 import Candle from './Candle';
 import CandleAltar from './CandleAltar';
 import ReportModal from './ReportModal';
@@ -44,7 +45,12 @@ export default function MemorialCard({
   candleExpiresAt: propCandleExpiresAt,
   totalCandlesLit: propTotalCandlesLit,
   activeCount: propActiveCount,
+  now: propNow,
 }) {
+  // Shared clock (unix seconds) supplied by the page so all cards tick together on one timer.
+  // Only when no parent provides it does the card run its own clock.
+  const ownNow = useNow(15000, propNow === undefined);
+
   // Strict boolean normalization — guards against 0n, undefined, null from contract/props
   const isPublic = Boolean(isPublicRaw);
 
@@ -265,7 +271,7 @@ export default function MemorialCard({
     },
   });
 
-  const now = Math.floor(Date.now() / 1000);
+  const now = propNow ?? ownNow;
   const candleExpiresAt = Number(
     propCandleExpiresAt ??
     candleExpiryRaw ??

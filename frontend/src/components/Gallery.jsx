@@ -23,9 +23,13 @@ function SkeletonCard() {
 }
 
 import { useMemorials } from '../utils/useMemorials';
+import { useNow } from '../hooks/useNow';
 
 export default function Gallery() {
   const navigate = useNavigate();
+
+  // Single shared clock for every card in the catalog (expired candles go out in real time)
+  const now = useNow();
 
   // State management
   const [searchQuery, setSearchQuery] = useState('');
@@ -392,6 +396,7 @@ export default function Gallery() {
                     category={item.category}
                     breed={item.breed}
                     memorial={item}
+                    now={now}
                     onUpdate={refetch}
                   />
                 ))}
