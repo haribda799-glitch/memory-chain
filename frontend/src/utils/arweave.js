@@ -161,32 +161,103 @@ function persistEpitaphForTx(metadataTxId, metadata) {
 
 /**
  * Downscale an image File to a compact JPEG data URL (fits localStorage).
- * Resolves '' if the file can't be processed.
+ * Uses multi-stage fallback (FileReader -> ObjectURL -> raw DataURL) for Android Chrome compatibility.
  */
 async function fileToCompactDataUrl(file, maxSide = 640, quality = 0.82) {
-  if (!file || typeof document === 'undefined') return '';
-  if (file.type?.startsWith('image/')) {
-    let objectUrl = '';
-    try {
-      objectUrl = URL.createObjectURL(file);
-      const img = await new Promise((resolve, reject) => {
-        const el = new Image();
-        el.onload = () => resolve(el);
-        el.onerror = reject;
-        el.src = objectUrl;
-      });
-      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-      return canvas.toDataURL('image/jpeg', quality);
-    } catch (err) {
-      console.warn('[MOCK] Image compression failed:', err);
-    } finally {
-      // Always release the blob URL, including on decode errors
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+  if (!file || typeof document === 'undefined' || file.size === 0) return '';
+  const looksLikeImage = Boolean(
+    file.type?.startsWith('image/') ||
+    /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '') ||
+    !file.type
+  );
+  if (!looksLikeImage) return '';
+
+  const drawImgToJpeg = (srcUrl) =>
+    new Promise((resolve, reject) => {
+      const el = new Image();
+      const timer = setTimeout(() => {
+        el.onload = null;
+        el.onerror = null;
+        reject(new Error('Image load timeout'));
+      }, 6000);
+      el.onload = () => {
+        clearTimeout(timer);
+        try {
+          const nw = el.naturalWidth || el.width;
+          const nh = el.naturalHeight || el.height;
+          if (!nw || !nh) {
+            reject(new Error('Invalid image dimensions'));
+            return;
+          }
+          const scale = Math.min(1, maxSide / Math.max(nw, nh));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(nw * scale));
+          canvas.height = Math.max(1, Math.round(nh * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Canvas context unavailable'));
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+          const out = canvas.toDataURL('image/jpeg', quality);
+          canvas.width = 0;
+          canvas.height = 0;
+          resolve(out);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      el.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error('Image load error'));
+      };
+      el.src = srcUrl;
+    });
+
+  // Attempt 1: FileReader.readAsDataURL + new Image()
+  let rawDataUrl = '';
+  try {
+    const readerData = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('FileReader error'));
+      reader.readAsDataURL(file);
+    });
+    if (typeof readerData === 'string' && readerData.startsWith('data:')) {
+      if (readerData.startsWith('data:image/')) {
+        rawDataUrl = readerData;
+      } else {
+        const commaIdx = readerData.indexOf(',');
+        rawDataUrl = commaIdx !== -1 ? `data:image/jpeg;base64,${readerData.slice(commaIdx + 1)}` : readerData;
+      }
+      const compressed = await drawImgToJpeg(rawDataUrl);
+      if (compressed && compressed.startsWith('data:image/jpeg;base64,')) {
+        return compressed;
+      }
     }
+  } catch (err1) {
+    console.warn('[MOCK] FileReader compression attempt note:', err1?.message || err1);
+  }
+
+  // Attempt 2: URL.createObjectURL + new Image() (revoke only after draw completes)
+  let objectUrl = '';
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const compressed = await drawImgToJpeg(objectUrl);
+    if (compressed && compressed.startsWith('data:image/jpeg;base64,')) {
+      return compressed;
+    }
+  } catch (err2) {
+    console.warn('[MOCK] ObjectURL compression attempt note:', err2?.message || err2);
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+
+  // Attempt 3: Ultimate fallback to raw Data URL if small enough for localStorage
+  if (rawDataUrl && rawDataUrl.length < 2_500_000) {
+    return rawDataUrl;
   }
   return '';
 }

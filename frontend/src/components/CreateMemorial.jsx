@@ -117,167 +117,178 @@ function validateStoryFields({ birthDate, memorialDate, birthYear, passingYear }
 }
 
 /**
- * Universal proportional thumbnail generator (Data URL max 800px).
- * Safely downsamples on mobile without allocating full 50MP uncompressed bitmaps in GPU memory,
- * and maintains natural aspect ratio via WHATWG single-dimension scaling.
+ * Normalize a FileReader Data URL when Android Photo Picker / content:// providers
+ * supply an empty MIME type (`data:;base64,...` or `data:application/octet-stream;base64,...`).
  */
-async function generateThumbnail(file, maxDim = THUMBNAIL_MAX_DIM, quality = THUMBNAIL_QUALITY) {
-  if (!file) return null;
-  const isImage = Boolean(
-    file.type?.startsWith('image/') ||
-    /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || '') ||
-    (!file.type && file.size > 0)
-  );
-  if (!isImage || file.type === 'image/gif') return null;
+function normalizeImageDataUrl(dataUrl, file) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return '';
+  if (dataUrl.startsWith('data:image/')) return dataUrl;
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return dataUrl;
+  const header = dataUrl.slice(0, commaIdx);
+  if (!header.includes(';base64')) return dataUrl;
+  const name = (file?.name || '').toLowerCase();
+  let mime = 'image/jpeg';
+  if (name.endsWith('.png')) mime = 'image/png';
+  else if (name.endsWith('.webp')) mime = 'image/webp';
+  else if (name.endsWith('.gif')) mime = 'image/gif';
+  else if (name.endsWith('.bmp')) mime = 'image/bmp';
+  else if (name.endsWith('.heic')) mime = 'image/heic';
+  else if (name.endsWith('.heif')) mime = 'image/heif';
+  return `data:${mime};base64,${dataUrl.slice(commaIdx + 1)}`;
+}
 
-  // Approach 1: HTMLImageElement via lightweight ObjectURL
-  // Universal across iOS Safari, Android Chrome/Samsung, and Desktop.
-  // Respects EXIF orientation automatically, decodes natively, and frees memory immediately.
-  try {
-    const objectUrl = URL.createObjectURL(file);
-    try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const img = new Image();
-        const timer = setTimeout(() => {
-          img.onload = null;
-          img.onerror = null;
-          img.src = '';
-          reject(new Error('Image decode timeout'));
-        }, 4000);
-        img.onload = () => {
-          clearTimeout(timer);
-          try {
-            const nw = img.naturalWidth || img.width;
-            const nh = img.naturalHeight || img.height;
-            if (!nw || !nh) {
-              reject(new Error('Invalid image dimensions'));
-              return;
-            }
-            const scale = Math.min(1, maxDim / Math.max(nw, nh));
-            const w = Math.max(1, Math.round(nw * scale));
-            const h = Math.max(1, Math.round(nh * scale));
-            const canvas = document.createElement('canvas');
-            canvas.width = w;
-            canvas.height = h;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) {
-              reject(new Error('Canvas 2D context unavailable'));
-              return;
-            }
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, w, h);
-            ctx.drawImage(img, 0, 0, w, h);
-            const res = canvas.toDataURL('image/jpeg', quality);
-            canvas.width = 0;
-            canvas.height = 0;
-            img.onload = null;
-            img.onerror = null;
-            img.src = '';
-            resolve(res);
-          } catch (e) {
-            reject(e);
-          }
-        };
-        img.onerror = () => {
-          clearTimeout(timer);
-          img.onload = null;
-          img.onerror = null;
-          img.src = '';
-          reject(new Error('Image decode failed'));
-        };
-        img.src = objectUrl;
-      });
-      if (dataUrl && dataUrl.startsWith('data:image/jpeg;base64,')) {
-        return dataUrl;
-      }
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
-  } catch (err) {
-    console.warn('[CreateMemorial] Thumbnail Approach 1 (Image) note:', err?.message || err);
-  }
+/**
+ * Helper to load a URL (Data URL or ObjectURL) into an HTMLImageElement via standard onload
+ * (never calling img.decode(), which throws EncodingError on valid JPEG/WebP on Android Chrome)
+ * and downscale it on a 2D Canvas.
+ */
+function renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const timer = setTimeout(() => {
+      img.onload = null;
+      img.onerror = null;
+      reject(new Error('Image load timeout'));
+    }, timeoutMs);
 
-  // Approach 2: createImageBitmap with hardware downsampling (Chrome Android, Desktop)
-  if (typeof createImageBitmap === 'function') {
-    try {
-      let bmp = null;
+    img.onload = () => {
+      clearTimeout(timer);
       try {
-        bmp = await createImageBitmap(file, {
-          resizeWidth: maxDim,
-          resizeQuality: 'medium',
-        });
-      } catch {
-        bmp = await createImageBitmap(file);
-      }
-      if (bmp) {
-        const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
-        const w = Math.max(1, Math.round(bmp.width * scale));
-        const h = Math.max(1, Math.round(bmp.height * scale));
+        const nw = img.naturalWidth || img.width;
+        const nh = img.naturalHeight || img.height;
+        if (!nw || !nh) {
+          reject(new Error('Invalid image dimensions'));
+          return;
+        }
+        const scale = Math.min(1, maxDim / Math.max(nw, nh));
+        const w = Math.max(1, Math.round(nw * scale));
+        const h = Math.max(1, Math.round(nh * scale));
         const canvas = document.createElement('canvas');
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, w, h);
-          ctx.drawImage(bmp, 0, 0, w, h);
-          bmp.close?.();
-          const res = canvas.toDataURL('image/jpeg', quality);
-          canvas.width = 0;
-          canvas.height = 0;
-          if (res && res.startsWith('data:image/jpeg;base64,')) {
-            return res;
-          }
+        if (!ctx) {
+          reject(new Error('Canvas 2D context unavailable'));
+          return;
         }
-        bmp.close?.();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const res = canvas.toDataURL('image/jpeg', quality);
+        canvas.width = 0;
+        canvas.height = 0;
+        img.onload = null;
+        img.onerror = null;
+        if (res && res.startsWith('data:image/jpeg;base64,')) {
+          resolve(res);
+        } else {
+          reject(new Error('Canvas toDataURL produced empty output'));
+        }
+      } catch (e) {
+        reject(e);
       }
-    } catch (bmpErr) {
-      console.warn('[CreateMemorial] Thumbnail Approach 2 (Bitmap) note:', bmpErr?.message || bmpErr);
-    }
-  }
+    };
 
-  // Approach 3: Universal FileReader Data URL fallback (verified decodable)
+    img.onerror = () => {
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      reject(new Error('Image load error'));
+    };
+
+    img.src = srcUrl;
+  });
+}
+
+// Non-blocking fallback SVG preview used only when an exotic mobile format (e.g. raw HEIC)
+// cannot be rendered by the browser's <img> tag, while still allowing the file to be uploaded.
+const FALLBACK_PORTRAIT_SVG_DATA_URL =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">' +
+      '<rect width="600" height="400" fill="#f5f3f0"/>' +
+      '<circle cx="300" cy="175" r="44" fill="#ebdcd1"/>' +
+      '<path d="M286 168c0-8 6-14 14-14s14 6 14 14-6 14-14 14-14-6-14-14zm-18 36c6-12 18-18 32-18s26 6 32 18" stroke="#8a4f36" stroke-width="4" fill="none" stroke-linecap="round"/>' +
+      '<text x="300" y="255" text-anchor="middle" font-family="Georgia, serif" font-size="18" fill="#53433e">Portrait Selected &amp; Ready</text>' +
+      '<text x="300" y="282" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#85736d">Your photo will be preserved on-chain</text>' +
+    '</svg>'
+  );
+
+/**
+ * Universal multi-stage proportional thumbnail generator (Data URL max 800px).
+ * - Attempt 1: FileReader.readAsDataURL(file) + new Image() -> Canvas resize
+ * - Attempt 2: URL.createObjectURL(file) + new Image() (onload only, no img.decode(), no premature revokeObjectURL) -> Canvas resize
+ * - Attempt 3 (Ultimate Fallback): if Canvas resize/decoding fails, return the raw DataURL or ObjectURL as-is
+ *   so the user is never blocked from creating a memorial on Android Chrome.
+ */
+async function generateThumbnail(
+  file,
+  maxDim = THUMBNAIL_MAX_DIM,
+  quality = THUMBNAIL_QUALITY,
+  registerObjectUrl = null
+) {
+  if (!file || file.size === 0) return null;
+
+  let rawDataUrl = '';
+  let rawObjectUrl = '';
+
+  // Attempt 1: FileReader.readAsDataURL(file) + new Image()
   try {
-    const dataUrl = await new Promise((resolve, reject) => {
+    const readerResult = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
+      reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
       reader.readAsDataURL(file);
     });
-    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
-      const isDecodable = await new Promise((resolve) => {
-        const testImg = new Image();
-        const testTimer = setTimeout(() => {
-          testImg.onload = null;
-          testImg.onerror = null;
-          testImg.src = '';
-          resolve(false);
-        }, 3000);
-        testImg.onload = () => {
-          clearTimeout(testTimer);
-          testImg.onload = null;
-          testImg.onerror = null;
-          testImg.src = '';
-          resolve(true);
-        };
-        testImg.onerror = () => {
-          clearTimeout(testTimer);
-          testImg.onload = null;
-          testImg.onerror = null;
-          testImg.src = '';
-          resolve(false);
-        };
-        testImg.src = dataUrl;
-      });
-      if (isDecodable) {
-        return dataUrl;
+    rawDataUrl = normalizeImageDataUrl(readerResult, file);
+    if (rawDataUrl) {
+      if (file.type === 'image/gif') {
+        return rawDataUrl;
+      }
+      const resizedFromDataUrl = await renderUrlToCanvasJpeg(rawDataUrl, maxDim, quality);
+      if (resizedFromDataUrl) {
+        return resizedFromDataUrl;
       }
     }
-  } catch (readerErr) {
-    console.warn('[CreateMemorial] Thumbnail Approach 3 (FileReader) note:', readerErr?.message || readerErr);
+  } catch (err1) {
+    console.warn('[CreateMemorial] Thumbnail Attempt 1 (FileReader + Image) note:', err1?.message || err1);
   }
 
-  return null;
+  // Attempt 2: URL.createObjectURL(file) + new Image() (with onload, no img.decode(), no premature revoke)
+  try {
+    rawObjectUrl = URL.createObjectURL(file);
+    if (typeof registerObjectUrl === 'function') {
+      registerObjectUrl(rawObjectUrl);
+    }
+    if (file.type === 'image/gif') {
+      return rawObjectUrl;
+    }
+    const resizedFromObjectUrl = await renderUrlToCanvasJpeg(rawObjectUrl, maxDim, quality);
+    if (resizedFromObjectUrl) {
+      return resizedFromObjectUrl;
+    }
+  } catch (err2) {
+    console.warn('[CreateMemorial] Thumbnail Attempt 2 (ObjectURL + Image) note:', err2?.message || err2);
+  }
+
+  // Attempt 3 (Ultimate Fallback): If Canvas resize/decoding failed, do NOT block the user —
+  // return the raw DataURL or ObjectURL so preview & memorial creation proceed unimpeded.
+  if (rawDataUrl) {
+    return rawDataUrl;
+  }
+  if (rawObjectUrl) {
+    return rawObjectUrl;
+  }
+  try {
+    const fallbackObjectUrl = URL.createObjectURL(file);
+    if (typeof registerObjectUrl === 'function') {
+      registerObjectUrl(fallbackObjectUrl);
+    }
+    return fallbackObjectUrl;
+  } catch {
+    return FALLBACK_PORTRAIT_SVG_DATA_URL;
+  }
 }
 
 /**
@@ -511,41 +522,56 @@ export default function CreateMemorial() {
   // Dedicated file input ref for reliable reset across repeated creations
   const fileInputRef = useRef(null);
 
-  // Current preview object URL, kept in a ref so it can be revoked only on unmount or file replacement
+  // Current preview URL and tracked ObjectURLs so blob URLs are NEVER revoked mid-read/render,
+  // and are only released on photo removal, form reset, mint completion, or component unmount.
   const previewUrlRef = useRef('');
+  const objectUrlsRef = useRef(new Set());
 
-  // Track mount timestamp to silence spurious browser auto-restore errors on page reload
-  const mountTimeRef = useRef(Date.now());
+  const registerObjectUrl = useCallback((url) => {
+    if (typeof url === 'string' && url.startsWith('blob:')) {
+      objectUrlsRef.current.add(url);
+    }
+  }, []);
+
+  const revokeTrackedObjectUrls = useCallback((keepUrl = '') => {
+    for (const url of objectUrlsRef.current) {
+      if (url !== keepUrl) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+        objectUrlsRef.current.delete(url);
+      }
+    }
+  }, []);
 
   // Immediate background warmup of AI models on component mount
   useEffect(() => {
     preloadAiModels();
   }, []);
 
-  // Ensure file input has no stale browser-restored value on mount / reconnection
+  // Ensure file input has no stale browser-restored value on initial mount only
+  // (never clear input.value while a file selection is being read on Android Chrome!)
   useEffect(() => {
-    if (fileInputRef.current && !photo) {
+    if (fileInputRef.current) {
       try {
         fileInputRef.current.value = '';
       } catch {}
     }
-  }, [isConnected, photo]);
+  }, []);
 
   useEffect(() => {
     return () => {
-      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-        URL.revokeObjectURL(previewUrlRef.current);
-        previewUrlRef.current = '';
-      }
+      revokeTrackedObjectUrls();
+      previewUrlRef.current = '';
       resetAiModeration();
     };
-  }, []);
+  }, [revokeTrackedObjectUrls]);
 
   const handleRemoveImage = useCallback(() => {
     analysisRunIdRef.current += 1;
-    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-      URL.revokeObjectURL(previewUrlRef.current);
-    }
+    revokeTrackedObjectUrls();
     previewUrlRef.current = '';
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
@@ -557,7 +583,7 @@ export default function CreateMemorial() {
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-  }, []);
+  }, [revokeTrackedObjectUrls]);
 
   const { writeContractAsync } = useWriteContract();
   const {
@@ -679,9 +705,7 @@ export default function CreateMemorial() {
     setDescription('');
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
-    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-      URL.revokeObjectURL(previewUrlRef.current);
-    }
+    revokeTrackedObjectUrls();
     previewUrlRef.current = '';
     setPreviewUrl('');
     setIsProcessingPhoto(false);
@@ -701,7 +725,7 @@ export default function CreateMemorial() {
     setMintedIsPublic(false);
     setShowShareModal(false);
     resetAiModeration();
-  }, []);
+  }, [revokeTrackedObjectUrls]);
 
   // Initialize clean state and check for saved draft on mount
   useEffect(() => {
@@ -728,9 +752,7 @@ export default function CreateMemorial() {
       analysisRunIdRef.current += 1;
       if (fileInputRef.current) fileInputRef.current.value = '';
       setPhoto(null);
-      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-        URL.revokeObjectURL(previewUrlRef.current);
-      }
+      revokeTrackedObjectUrls();
       previewUrlRef.current = '';
       setPreviewUrl('');
       setIsProcessingPhoto(false);
@@ -739,7 +761,7 @@ export default function CreateMemorial() {
       setError(null);
       resetAiModeration();
     }
-  }, [isSuccess, persistDraft]);
+  }, [isSuccess, persistDraft, revokeTrackedObjectUrls]);
 
   // Read creation_fee from contract
   const { data: creationFeeRaw, refetch: refetchCreationFee } = useReadContract({
@@ -822,13 +844,13 @@ export default function CreateMemorial() {
    * Fast preview is already on screen; nothing here blocks the UI. */
   const processSelectedImage = useCallback(async (file, imagePreviewUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
-    let tempUrl = null;
     try {
       if (!isCurrent()) return;
 
       let aiUrl = imagePreviewUrl || previewUrlRef.current;
       if (!aiUrl) {
-        tempUrl = URL.createObjectURL(file);
+        const tempUrl = URL.createObjectURL(file);
+        registerObjectUrl(tempUrl);
         aiUrl = tempUrl;
       }
 
@@ -855,10 +877,8 @@ export default function CreateMemorial() {
     } catch (err) {
       console.warn('[CreateMemorial] Image processing error, check skipped:', err?.message || err);
       if (isCurrent()) setCheckStatus('skipped');
-    } finally {
-      if (tempUrl) URL.revokeObjectURL(tempUrl);
     }
-  }, [runAiCheck]);
+  }, [runAiCheck, registerObjectUrl]);
 
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
@@ -868,7 +888,7 @@ export default function CreateMemorial() {
       /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '') ||
       (!file.type && file.size > 0)
     );
-    if (!looksLikeImage) {
+    if (!looksLikeImage || file.size === 0) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
@@ -883,49 +903,37 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     setError(null);
 
-    // Provide immediate visual feedback while generating the proportional preview
+    // Keep the selected File in state immediately so React re-renders never see !photo during decoding
+    setPhoto(file);
     setIsProcessingPhoto(true);
     setPhotoProgress(25);
 
-    // 1. Generate lightweight proportional Data URL preview immediately
+    // 1. Multi-stage proportional preview generation (Attempt 1: FileReader, Attempt 2: ObjectURL, Attempt 3: Ultimate Fallback)
     let thumbUrl = null;
     try {
       setPhotoProgress(55);
-      thumbUrl = await generateThumbnail(file);
+      thumbUrl = await generateThumbnail(file, THUMBNAIL_MAX_DIM, THUMBNAIL_QUALITY, registerObjectUrl);
       setPhotoProgress(85);
     } catch (e) {
-      console.warn('[CreateMemorial] Thumbnail error:', e);
+      console.warn('[CreateMemorial] Thumbnail note, using direct fallback:', e);
     }
     if (!isCurrent()) {
       // A newer selection (or removal) owns the photo UI state now — leave it untouched
       return;
     }
 
-    // Guard: If thumbnail generation failed, the file is unreadable, invalid, or was invalidated across page reload
+    // Ultimate Fallback: never block the user with a red error if Canvas resize couldn't decode the photo
     if (!thumbUrl) {
-      console.warn('[CreateMemorial] File could not be decoded as an image. Cleaning up photo state.');
-      setIsProcessingPhoto(false);
-      setPhotoProgress(0);
-      setPhoto(null);
-      setPreviewUrl('');
-      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-        URL.revokeObjectURL(previewUrlRef.current);
+      try {
+        thumbUrl = URL.createObjectURL(file);
+        registerObjectUrl(thumbUrl);
+      } catch {
+        thumbUrl = FALLBACK_PORTRAIT_SVG_DATA_URL;
       }
-      previewUrlRef.current = '';
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      setCheckStatus('idle');
-      // Only show error if the user interactively chose this file, not during automatic browser form restoration
-      if (Date.now() - mountTimeRef.current > 2500) {
-        setError('Unable to read this photo format. Please select another photo.');
-      }
-      return;
     }
 
     setPhotoProgress(100);
-
-    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-      URL.revokeObjectURL(previewUrlRef.current);
-    }
+    revokeTrackedObjectUrls(thumbUrl);
     previewUrlRef.current = thumbUrl;
     setPhoto(file);
     setPreviewUrl(thumbUrl);
@@ -938,26 +946,30 @@ export default function CreateMemorial() {
 
     // 2. Run non-blocking AI verification in background (does NOT block preview or UI)
     processSelectedImage(file, thumbUrl, runId);
-  }, [processSelectedImage]);
+  }, [processSelectedImage, registerObjectUrl, revokeTrackedObjectUrls]);
 
-  const handleImageError = useCallback(async (e) => {
-    console.warn('[CreateMemorial] Image preview decode note, attempting recovery:', e);
-    if (photo) {
+  const handleImageError = useCallback(async () => {
+    console.warn('[CreateMemorial] Image preview element reported an error, switching to non-blocking fallback.');
+    if (!photo) return;
+    // Try direct ObjectURL first if the current preview wasn't already a blob URL
+    if (previewUrlRef.current && !previewUrlRef.current.startsWith('blob:')) {
       try {
-        const recoveryUrl = await generateThumbnail(photo, 600, 0.75);
-        if (recoveryUrl && recoveryUrl !== previewUrlRef.current) {
-          previewUrlRef.current = recoveryUrl;
-          setPreviewUrl(recoveryUrl);
-          return;
-        }
-      } catch (recErr) {
-        console.warn('[CreateMemorial] Image preview recovery failed:', recErr);
+        const directBlobUrl = URL.createObjectURL(photo);
+        registerObjectUrl(directBlobUrl);
+        previewUrlRef.current = directBlobUrl;
+        setPreviewUrl(directBlobUrl);
+        return;
+      } catch {
+        // Fall through to SVG portrait placeholder
       }
-      // If recovery failed, cleanly remove the preview to prevent displaying a broken <img> or alt-text
-      handleRemoveImage();
-      setError('Photo preview could not be displayed. Please select a photo again.');
     }
-  }, [photo, handleRemoveImage]);
+    // Ultimate Fallback: keep the selected photo intact so the user can proceed to create the memorial
+    if (previewUrlRef.current !== FALLBACK_PORTRAIT_SVG_DATA_URL) {
+      previewUrlRef.current = FALLBACK_PORTRAIT_SVG_DATA_URL;
+      setPreviewUrl(FALLBACK_PORTRAIT_SVG_DATA_URL);
+      setCheckStatus((prev) => (prev === 'checking' ? 'skipped' : prev));
+    }
+  }, [photo, registerObjectUrl]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -1540,14 +1552,7 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input accessible to iOS Safari and Android */}
               <input
-                ref={(el) => {
-                  fileInputRef.current = el;
-                  if (el && !photo && el.value) {
-                    try {
-                      el.value = '';
-                    } catch {}
-                  }
-                }}
+                ref={fileInputRef}
                 id="photo-input"
                 type="file"
                 autoComplete="off"

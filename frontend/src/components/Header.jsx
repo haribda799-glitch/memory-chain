@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
 import { useDisconnect } from 'wagmi';
@@ -7,6 +7,7 @@ import { baseSepolia } from 'viem/chains';
 export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const burgerButtonRef = useRef(null);
 
   // Privy Hooks
   const { ready, authenticated, login, logout, exportWallet, user, createWallet } = usePrivy();
@@ -35,6 +36,11 @@ export default function Header() {
       createWallet();
     }
   }, [authenticated, embeddedWallet, user]);
+
+  // Clear residual browser focus on the mobile burger button when Privy modal closes or auth state changes
+  useEffect(() => {
+    burgerButtonRef.current?.blur();
+  }, [authenticated, menuOpen]);
 
   const networkName = 'Base Sepolia';
   const truncate = (addr) => addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : '';
@@ -161,9 +167,13 @@ export default function Header() {
                 </div>
               ) : (
                 <button
-                  onClick={login}
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    login();
+                  }}
                   disabled={!ready}
-                  className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50"
+                  className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
                 >
                   Connect Wallet
                 </button>
@@ -172,8 +182,20 @@ export default function Header() {
           </div>
 
           {/* Mobile burger */}
-          <button className="md:hidden" onClick={() => setMenuOpen(!menuOpen)}>
-            <span className="material-symbols-outlined text-on-surface-variant">{menuOpen ? 'close' : 'menu'}</span>
+          <button
+            ref={burgerButtonRef}
+            type="button"
+            aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={menuOpen}
+            className="md:hidden w-10 h-10 inline-flex items-center justify-center rounded-lg shrink-0 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              setMenuOpen((prev) => !prev);
+            }}
+          >
+            <span className="material-symbols-outlined text-on-surface-variant leading-none select-none">
+              {menuOpen ? 'close' : 'menu'}
+            </span>
           </button>
         </div>
 
@@ -211,9 +233,15 @@ export default function Header() {
               </div>
             ) : (
               <button
-                onClick={() => { login(); setMenuOpen(false); }}
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setMenuOpen(false);
+                  burgerButtonRef.current?.blur();
+                  login();
+                }}
                 disabled={!ready}
-                className="text-left text-primary font-bold text-body-md disabled:opacity-50 pl-2"
+                className="text-left text-primary font-bold text-body-md disabled:opacity-50 pl-2 outline-none focus:outline-none"
               >
                 Connect Wallet
               </button>
