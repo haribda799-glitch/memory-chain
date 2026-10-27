@@ -31,6 +31,8 @@ const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once 
 
 const THUMBNAIL_MAX_DIM = 800;
 const THUMBNAIL_QUALITY = 0.85;
+const TAB_WAKEUP_DELAY_MS = 180;              // 150-200ms pause after rAF so Android Chrome restores GPU/Canvas/WebGL context after Photo Picker
+const RETRY_DELAY_MS = 350;                   // 350ms delay before automatic silent retry of image decode / AI check
 
 /* ── On-chain / validation constants ───────────────────────── */
 const MAX_PET_NAME_BYTES = 128;                // Vyper String[128] limits UTF-8 BYTES, not characters
@@ -140,6 +142,64 @@ function normalizeImageDataUrl(dataUrl, file) {
   return `data:${mime};base64,${dataUrl.slice(commaIdx + 1)}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Waits for requestAnimationFrame + a short pause (150-200ms) so mobile Chrome
+ * finishes waking up its graphics/Canvas/WebGL context after returning from the system Photo Picker.
+ */
+function waitForTabWakeup(delayMs = TAB_WAKEUP_DELAY_MS) {
+  return new Promise((resolve) => {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        setTimeout(resolve, delayMs);
+      };
+      const rafFallback = setTimeout(done, 120);
+      window.requestAnimationFrame(() => {
+        clearTimeout(rafFallback);
+        done();
+      });
+    } else {
+      setTimeout(resolve, delayMs);
+    }
+  });
+}
+
+function readFileAsDataUrlOnce(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const normalized = normalizeImageDataUrl(reader.result, file);
+      if (normalized && normalized.startsWith('data:image/')) {
+        resolve(normalized);
+      } else {
+        reject(new Error('FileReader returned empty or non-image Data URL'));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Reads a File into a normalized `data:image/...` URL via FileReader,
+ * automatically retrying after 350ms if the first read fails while Android wakes up.
+ */
+async function readFileAsDataUrlWithRetry(file) {
+  try {
+    return await readFileAsDataUrlOnce(file);
+  } catch (err1) {
+    console.warn('[CreateMemorial] FileReader 1st attempt failed, retrying after 350ms:', err1?.message || err1);
+    await sleep(RETRY_DELAY_MS);
+    return await readFileAsDataUrlOnce(file);
+  }
+}
+
 /**
  * Helper to load a URL (Data URL or ObjectURL) into an HTMLImageElement via standard onload
  * (never calling img.decode(), which throws EncodingError on valid JPEG/WebP on Android Chrome)
@@ -203,6 +263,16 @@ function renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs = 8000) {
   });
 }
 
+async function renderUrlToCanvasJpegWithRetry(srcUrl, maxDim, quality, timeoutMs = 8000) {
+  try {
+    return await renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs);
+  } catch (err1) {
+    console.warn('[CreateMemorial] Canvas decode 1st attempt failed, retrying after 350ms:', err1?.message || err1);
+    await sleep(RETRY_DELAY_MS);
+    return await renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs);
+  }
+}
+
 // Non-blocking fallback SVG preview used only when an exotic mobile format (e.g. raw HEIC)
 // cannot be rendered by the browser's <img> tag, while still allowing the file to be uploaded.
 const FALLBACK_PORTRAIT_SVG_DATA_URL =
@@ -218,64 +288,60 @@ const FALLBACK_PORTRAIT_SVG_DATA_URL =
   );
 
 /**
- * Universal multi-stage proportional thumbnail generator (Data URL max 800px).
- * - Attempt 1: FileReader.readAsDataURL(file) + new Image() -> Canvas resize
- * - Attempt 2: URL.createObjectURL(file) + new Image() (onload only, no img.decode(), no premature revokeObjectURL) -> Canvas resize
- * - Attempt 3 (Ultimate Fallback): if Canvas resize/decoding fails, return the raw DataURL or ObjectURL as-is
- *   so the user is never blocked from creating a memorial on Android Chrome.
+ * Universal multi-stage proportional thumbnail generator (Data URL max 800px) with automatic retry:
+ * - Attempt 1: FileReader.readAsDataURL(file) + renderUrlToCanvasJpegWithRetry (with 350ms retry)
+ * - Attempt 2: URL.createObjectURL(file) + renderUrlToCanvasJpegWithRetry (with 350ms retry)
+ * - Attempt 3: Always preserve the valid FileReader rawDataUrl if Canvas resize failed, never replacing
+ *   a valid FileReader Data URL with the SVG placeholder.
  */
 async function generateThumbnail(
   file,
   maxDim = THUMBNAIL_MAX_DIM,
   quality = THUMBNAIL_QUALITY,
-  registerObjectUrl = null
+  registerObjectUrl = null,
+  preloadedRawDataUrl = ''
 ) {
   if (!file || file.size === 0) return null;
 
-  let rawDataUrl = '';
+  let rawDataUrl = preloadedRawDataUrl || '';
   let rawObjectUrl = '';
 
-  // Attempt 1: FileReader.readAsDataURL(file) + new Image()
+  // Attempt 1: FileReader Data URL + Canvas resize (with automatic 350ms retry)
   try {
-    const readerResult = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
-      reader.readAsDataURL(file);
-    });
-    rawDataUrl = normalizeImageDataUrl(readerResult, file);
+    if (!rawDataUrl) {
+      rawDataUrl = await readFileAsDataUrlWithRetry(file);
+    }
     if (rawDataUrl) {
       if (file.type === 'image/gif') {
         return rawDataUrl;
       }
-      const resizedFromDataUrl = await renderUrlToCanvasJpeg(rawDataUrl, maxDim, quality);
+      const resizedFromDataUrl = await renderUrlToCanvasJpegWithRetry(rawDataUrl, maxDim, quality);
       if (resizedFromDataUrl) {
         return resizedFromDataUrl;
       }
     }
   } catch (err1) {
-    console.warn('[CreateMemorial] Thumbnail Attempt 1 (FileReader + Image) note:', err1?.message || err1);
+    console.warn('[CreateMemorial] Thumbnail Attempt 1 (FileReader + Canvas) note:', err1?.message || err1);
   }
 
-  // Attempt 2: URL.createObjectURL(file) + new Image() (with onload, no img.decode(), no premature revoke)
+  // Attempt 2: URL.createObjectURL(file) + Canvas resize (with automatic 350ms retry)
   try {
     rawObjectUrl = URL.createObjectURL(file);
     if (typeof registerObjectUrl === 'function') {
       registerObjectUrl(rawObjectUrl);
     }
     if (file.type === 'image/gif') {
-      return rawObjectUrl;
+      return rawDataUrl || rawObjectUrl;
     }
-    const resizedFromObjectUrl = await renderUrlToCanvasJpeg(rawObjectUrl, maxDim, quality);
+    const resizedFromObjectUrl = await renderUrlToCanvasJpegWithRetry(rawObjectUrl, maxDim, quality);
     if (resizedFromObjectUrl) {
       return resizedFromObjectUrl;
     }
   } catch (err2) {
-    console.warn('[CreateMemorial] Thumbnail Attempt 2 (ObjectURL + Image) note:', err2?.message || err2);
+    console.warn('[CreateMemorial] Thumbnail Attempt 2 (ObjectURL + Canvas) note:', err2?.message || err2);
   }
 
-  // Attempt 3 (Ultimate Fallback): If Canvas resize/decoding failed, do NOT block the user —
-  // return the raw DataURL or ObjectURL so preview & memorial creation proceed unimpeded.
+  // Attempt 3: Always prefer the real FileReader Data URL over any fallback so <img> renders the real photo
   if (rawDataUrl) {
     return rawDataUrl;
   }
@@ -534,9 +600,12 @@ export default function CreateMemorial() {
   // Dedicated file input ref for reliable reset across repeated creations
   const fileInputRef = useRef(null);
 
-  // Current preview URL and tracked ObjectURLs so blob URLs are NEVER revoked mid-read/render,
-  // and are only released on photo removal, form reset, mint completion, or component unmount.
+  // Current preview URL, raw FileReader Data URL, and tracked ObjectURLs so blob URLs are NEVER revoked mid-read/render,
+  // and a valid FileReader Data URL is never replaced by a placeholder unless <img> itself fails after retries.
   const previewUrlRef = useRef('');
+  const rawDataUrlRef = useRef('');
+  const imgErrorRetryCountRef = useRef(0);
+  const [imgRetryTick, setImgRetryTick] = useState(0);
   const objectUrlsRef = useRef(new Set());
 
   const registerObjectUrl = useCallback((url) => {
@@ -577,6 +646,8 @@ export default function CreateMemorial() {
     return () => {
       revokeTrackedObjectUrls();
       previewUrlRef.current = '';
+      rawDataUrlRef.current = '';
+      imgErrorRetryCountRef.current = 0;
       resetAiModeration();
     };
   }, [revokeTrackedObjectUrls]);
@@ -585,6 +656,9 @@ export default function CreateMemorial() {
     analysisRunIdRef.current += 1;
     revokeTrackedObjectUrls();
     previewUrlRef.current = '';
+    rawDataUrlRef.current = '';
+    imgErrorRetryCountRef.current = 0;
+    setImgRetryTick(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
@@ -719,6 +793,9 @@ export default function CreateMemorial() {
     setPhoto(null);
     revokeTrackedObjectUrls();
     previewUrlRef.current = '';
+    rawDataUrlRef.current = '';
+    imgErrorRetryCountRef.current = 0;
+    setImgRetryTick(0);
     setPreviewUrl('');
     setIsProcessingPhoto(false);
     setPhotoProgress(0);
@@ -766,6 +843,9 @@ export default function CreateMemorial() {
       setPhoto(null);
       revokeTrackedObjectUrls();
       previewUrlRef.current = '';
+      rawDataUrlRef.current = '';
+      imgErrorRetryCountRef.current = 0;
+      setImgRetryTick(0);
       setPreviewUrl('');
       setIsProcessingPhoto(false);
       setPhotoProgress(0);
@@ -798,7 +878,7 @@ export default function CreateMemorial() {
     isFeeKnown && balance?.value !== undefined && balance.value < creationFee + GAS_BUFFER_WEI
   );
 
-  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) ── */
+  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) with automatic retry ── */
   const runAiCheck = useCallback(async (imageUrl) => {
     // 1. Ensure TFJS backend is ready and models are loaded
     await ensureTfReady();
@@ -807,30 +887,61 @@ export default function CreateMemorial() {
       getObjectModel(),
     ]);
 
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error('Failed to load image for AI analysis'));
-      img.src = imageUrl;
+    const loadAiImageOnce = (src) => new Promise((resolve, reject) => {
+      const candidate = new Image();
+      const timer = setTimeout(() => {
+        candidate.onload = null;
+        candidate.onerror = null;
+        reject(new Error('Timed out loading image for AI analysis'));
+      }, 6000);
+      candidate.onload = () => {
+        clearTimeout(timer);
+        resolve(candidate);
+      };
+      candidate.onerror = () => {
+        clearTimeout(timer);
+        candidate.onload = null;
+        candidate.onerror = null;
+        reject(new Error('Failed to load image for AI analysis'));
+      };
+      candidate.src = src;
     });
+
+    let img;
+    try {
+      img = await loadAiImageOnce(imageUrl);
+    } catch (loadErr) {
+      console.warn('[AI Analysis] Image decode 1st attempt failed, retrying after 350ms:', loadErr?.message || loadErr);
+      await sleep(RETRY_DELAY_MS);
+      const fallbackSrc = rawDataUrlRef.current || imageUrl;
+      img = await loadAiImageOnce(fallbackSrc);
+    }
 
     let faces = [];
     let predictions = [];
+    let faceFailed = false;
+    let objectFailed = false;
 
     try {
       faces = await faceModel.estimateFaces(img, false);
     } catch (faceErr) {
+      faceFailed = true;
       console.warn('[AI Analysis] Face detection warning:', faceErr);
     }
 
     try {
       predictions = await objectModel.detect(img);
     } catch (objErr) {
+      objectFailed = true;
       console.warn('[AI Analysis] Object detection warning:', objErr);
     } finally {
       img.onload = null;
       img.onerror = null;
       img.src = '';
+    }
+
+    if (faceFailed && objectFailed) {
+      throw new Error('Both AI models failed during inference (graphics context still waking up)');
     }
 
     const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
@@ -852,30 +963,47 @@ export default function CreateMemorial() {
     };
   }, []);
 
-  /* Background AI verification pipeline: runs with dynamic timeout (cold: 15s, warm: 5s).
-   * Fast preview is already on screen; nothing here blocks the UI. */
+  /* Background AI verification pipeline: runs with dynamic timeout (cold: 15s, warm: 5s)
+   * and an automatic 350ms retry if the first check fails while mobile Chrome wakes up. */
   const processSelectedImage = useCallback(async (file, imagePreviewUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     try {
       if (!isCurrent()) return;
 
-      let aiUrl = imagePreviewUrl || previewUrlRef.current;
+      let aiUrl =
+        (imagePreviewUrl && imagePreviewUrl !== FALLBACK_PORTRAIT_SVG_DATA_URL ? imagePreviewUrl : '') ||
+        rawDataUrlRef.current ||
+        (previewUrlRef.current && previewUrlRef.current !== FALLBACK_PORTRAIT_SVG_DATA_URL ? previewUrlRef.current : '');
+
       if (!aiUrl) {
         const tempUrl = URL.createObjectURL(file);
         registerObjectUrl(tempUrl);
         aiUrl = tempUrl;
       }
 
-      const timeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
-
-      const result = await Promise.race([
-        runAiCheck(aiUrl).catch((err) => {
-          console.warn('[AI Analysis] Check failed, skipping:', err?.message || err);
+      const runWithTimeout = (targetUrl, timeoutMs) => Promise.race([
+        runAiCheck(targetUrl).catch((err) => {
+          console.warn('[AI Analysis] Attempt failed:', err?.message || err);
           return null;
         }),
         new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
       ]);
+
+      const firstTimeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
+      let result = await runWithTimeout(aiUrl, firstTimeoutMs);
       if (!isCurrent()) return;
+
+      // Self-healing retry: if the 1st AI check attempt failed right after returning from Android Photo Picker,
+      // wait 350ms for WebGL/CPU backend recovery and retry once before marking as skipped.
+      if (!result) {
+        console.warn('[AI Analysis] 1st attempt returned null, retrying after 350ms...');
+        await sleep(RETRY_DELAY_MS);
+        if (!isCurrent()) return;
+        const retryUrl = rawDataUrlRef.current || aiUrl;
+        const retryTimeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
+        result = await runWithTimeout(retryUrl, retryTimeoutMs);
+        if (!isCurrent()) return;
+      }
 
       if (result) {
         isAiWarm = true;
@@ -883,7 +1011,7 @@ export default function CreateMemorial() {
         setDetectedAnimal(Boolean(result.hasAnimal));
         setCheckStatus('accepted');
       } else {
-        console.warn('[AI Analysis] Timed out or unavailable — check skipped.');
+        console.warn('[AI Analysis] Timed out or unavailable after retry — check skipped.');
         setCheckStatus('skipped');
       }
     } catch (err) {
@@ -915,26 +1043,66 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     setError(null);
 
+    imgErrorRetryCountRef.current = 0;
+    rawDataUrlRef.current = '';
+    setImgRetryTick(0);
+
     // Keep the selected File in state immediately so React re-renders never see !photo during decoding
     setPhoto(file);
     setIsProcessingPhoto(true);
-    setPhotoProgress(25);
+    setPhotoProgress(20);
+    setDetectedPerson(false);
+    setDetectedAnimal(true);
+    setHumanConsentGiven(false);
+    setCheckStatus('checking');
 
-    // 1. Multi-stage proportional preview generation (Attempt 1: FileReader, Attempt 2: ObjectURL, Attempt 3: Ultimate Fallback)
-    let thumbUrl = null;
+    // 1. Always read the real photo via FileReader (data: URL) first (with automatic 350ms retry)
+    //    and immediately set it as previewUrl so <img src={previewUrl} /> renders the real image.
+    let rawDataUrl = '';
     try {
+      rawDataUrl = await readFileAsDataUrlWithRetry(file);
+    } catch (readErr) {
+      console.warn('[CreateMemorial] Initial FileReader read note:', readErr?.message || readErr);
+    }
+    if (!isCurrent()) return;
+
+    if (rawDataUrl) {
+      rawDataUrlRef.current = rawDataUrl;
+      previewUrlRef.current = rawDataUrl;
+      setPreviewUrl(rawDataUrl);
       setPhotoProgress(55);
-      thumbUrl = await generateThumbnail(file, THUMBNAIL_MAX_DIM, THUMBNAIL_QUALITY, registerObjectUrl);
-      setPhotoProgress(85);
+    }
+
+    // 2. Wait for requestAnimationFrame + 180ms so Android Chrome finishes restoring its
+    //    graphics/Canvas/WebGL context after returning from the system Photo Picker.
+    await waitForTabWakeup(TAB_WAKEUP_DELAY_MS);
+    if (!isCurrent()) return;
+
+    // 3. Generate proportional Canvas thumbnail (with automatic 350ms retry).
+    //    Never overwrite a valid FileReader rawDataUrl with the SVG placeholder!
+    let thumbUrl = rawDataUrl;
+    try {
+      setPhotoProgress(75);
+      const generated = await generateThumbnail(
+        file,
+        THUMBNAIL_MAX_DIM,
+        THUMBNAIL_QUALITY,
+        registerObjectUrl,
+        rawDataUrl
+      );
+      if (generated && (generated !== FALLBACK_PORTRAIT_SVG_DATA_URL || !rawDataUrl)) {
+        thumbUrl = generated;
+      }
+      setPhotoProgress(90);
     } catch (e) {
-      console.warn('[CreateMemorial] Thumbnail note, using direct fallback:', e);
+      console.warn('[CreateMemorial] Thumbnail note, keeping FileReader dataUrl:', e);
     }
     if (!isCurrent()) {
       // A newer selection (or removal) owns the photo UI state now — leave it untouched
       return;
     }
 
-    // Ultimate Fallback: never block the user with a red error if Canvas resize couldn't decode the photo
+    // Ultimate Fallback only when even FileReader could not produce a dataUrl
     if (!thumbUrl) {
       try {
         thumbUrl = URL.createObjectURL(file);
@@ -951,35 +1119,65 @@ export default function CreateMemorial() {
     setPreviewUrl(thumbUrl);
     setIsProcessingPhoto(false);
 
-    setDetectedPerson(false);
-    setDetectedAnimal(true);
-    setHumanConsentGiven(false);
-    setCheckStatus('checking');
-
-    // 2. Run non-blocking AI verification in background (does NOT block preview or UI)
+    // 4. Run non-blocking AI verification in background (with automatic 350ms retry)
     processSelectedImage(file, thumbUrl, runId);
   }, [processSelectedImage, registerObjectUrl, revokeTrackedObjectUrls]);
 
   const handleImageError = useCallback(async () => {
-    console.warn('[CreateMemorial] Image preview element reported an error, switching to non-blocking fallback.');
     if (!photo) return;
-    // Try direct ObjectURL first if the current preview wasn't already a blob URL
-    if (previewUrlRef.current && !previewUrlRef.current.startsWith('blob:')) {
-      try {
-        const directBlobUrl = URL.createObjectURL(photo);
-        registerObjectUrl(directBlobUrl);
-        previewUrlRef.current = directBlobUrl;
-        setPreviewUrl(directBlobUrl);
+    const runId = analysisRunIdRef.current;
+    const isCurrent = () => runId === analysisRunIdRef.current;
+
+    // Self-healing retry: if <img> fired onError in the first frames while mobile Chrome was waking up
+    // from the Android Photo Picker, wait 350ms + rAF and retry rendering the real FileReader dataUrl.
+    if (imgErrorRetryCountRef.current < 2) {
+      imgErrorRetryCountRef.current += 1;
+      console.warn(
+        `[CreateMemorial] <img> preview load error (attempt ${imgErrorRetryCountRef.current}), retrying after 350ms wakeup...`
+      );
+      await waitForTabWakeup(RETRY_DELAY_MS);
+      if (!isCurrent()) return;
+
+      let recoveryDataUrl = rawDataUrlRef.current;
+      if (!recoveryDataUrl) {
+        try {
+          recoveryDataUrl = await readFileAsDataUrlWithRetry(photo);
+          if (recoveryDataUrl && isCurrent()) {
+            rawDataUrlRef.current = recoveryDataUrl;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!isCurrent()) return;
+
+      if (recoveryDataUrl) {
+        previewUrlRef.current = recoveryDataUrl;
+        setPreviewUrl(recoveryDataUrl);
+        setImgRetryTick((t) => t + 1);
         return;
-      } catch {
-        // Fall through to SVG portrait placeholder
+      }
+
+      if (imgErrorRetryCountRef.current === 1) {
+        try {
+          const directBlobUrl = URL.createObjectURL(photo);
+          registerObjectUrl(directBlobUrl);
+          previewUrlRef.current = directBlobUrl;
+          setPreviewUrl(directBlobUrl);
+          setImgRetryTick((t) => t + 1);
+          return;
+        } catch {
+          // fall through
+        }
       }
     }
-    // Ultimate Fallback: keep the selected photo intact so the user can proceed to create the memorial
+
+    // Ultimate Fallback: only reached if <img> genuinely cannot render even the FileReader dataUrl
+    // after wakeup + retries (e.g., an unsupported raw HEIC codec).
+    console.warn('[CreateMemorial] <img> could not decode format after retries, showing SVG placeholder.');
     if (previewUrlRef.current !== FALLBACK_PORTRAIT_SVG_DATA_URL) {
       previewUrlRef.current = FALLBACK_PORTRAIT_SVG_DATA_URL;
       setPreviewUrl(FALLBACK_PORTRAIT_SVG_DATA_URL);
-      setCheckStatus((prev) => (prev === 'checking' ? 'skipped' : prev));
     }
   }, [photo, registerObjectUrl]);
 
@@ -1641,6 +1839,7 @@ export default function CreateMemorial() {
                 <div className="space-y-3 animate-fadeIn">
                   <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
                     <img
+                      key={imgRetryTick}
                       src={previewUrl}
                       alt={photo?.name || 'Pet Portrait'}
                       className="w-full h-full object-cover"
