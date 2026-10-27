@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain, usePublicClient } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
+import { useSetActiveWallet } from '@privy-io/wagmi';
 import { formatEther, decodeEventLog } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { CONTRACT_ABI } from '../config/contract';
@@ -10,6 +11,7 @@ import {
   uploadToArweave, uploadJsonToArweave, buildNftMetadata,
 } from '../utils/arweave';
 import { formatTxError, isUserRejection } from '../utils/txErrors';
+import { isMobileWithoutEthereum, getMetaMaskDappDeepLink } from '../utils/mobileWallet';
 import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
@@ -461,8 +463,9 @@ async function preloadAiModels() {
 }
 
 export default function CreateMemorial() {
-  const { ready, authenticated } = usePrivy();
+  const { ready, authenticated, connectWallet, login, user } = usePrivy();
   const { wallets } = useWallets();
+  const { setActiveWallet } = useSetActiveWallet();
   const chainId = useChainId();
   const navigate = useNavigate();
   const contractAddress = getContractAddress(chainId);
@@ -470,12 +473,21 @@ export default function CreateMemorial() {
   const publicClient = usePublicClient({ chainId: baseSepolia.id });
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
+  const externalWallet = wallets.find((w) => w.walletClientType !== 'privy');
   const { address: wagmiAddress, connector, chain } = useAccount();
-  // Single source of truth for the signer: the wagmi-connected account (it belongs to `connector`).
-  // The Privy embedded address is only a display / balance fallback while wagmi has no account yet.
-  const activeUserAddress = wagmiAddress || embeddedWallet?.address;
+  // Single source of truth for the signer: prefer the wagmi-connected account,
+  // or any connected Privy wallet (external MetaMask via connectWallet() or embedded wallet).
+  const activeUserAddress = wagmiAddress || externalWallet?.address || embeddedWallet?.address || wallets[0]?.address || user?.wallet?.address;
   const { data: balance } = useBalance({ address: activeUserAddress });
-  const isConnected = ready && authenticated;
+  const isConnected = Boolean(activeUserAddress) || (ready && authenticated);
+
+  // Sync Privy external/embedded wallet into wagmi when connected via connectWallet() without SIWE
+  useEffect(() => {
+    const preferred = externalWallet || embeddedWallet || wallets[0];
+    if (preferred && !wagmiAddress && setActiveWallet) {
+      setActiveWallet(preferred).catch(() => {});
+    }
+  }, [externalWallet, embeddedWallet, wallets, wagmiAddress, setActiveWallet]);
 
   // Form state
   const [step, setStep] = useState(0); // Wizard step 0-2
@@ -1035,15 +1047,32 @@ export default function CreateMemorial() {
 
   // Wallet / network readiness. Returns an English error message, or '' when ready to send.
   const ensureWalletReady = async () => {
-    if (!isConnected) return 'Please connect your wallet first';
-    if (!connector || !wagmiAddress) {
+    if (!isConnected || !activeUserAddress) return 'Please connect your wallet first';
+    if (!wagmiAddress && setActiveWallet) {
+      const preferred = externalWallet || embeddedWallet || wallets[0];
+      if (preferred) {
+        try {
+          await setActiveWallet(preferred);
+        } catch {
+          // continue and check connector/address below
+        }
+      }
+    }
+    if (!connector && !activeUserAddress) {
       console.error('Wallet connector is missing or Privy was blocked.');
       return 'Wallet connection failed. Please disable your adblocker or reconnect your wallet.';
     }
     if (isCreationPaused) return 'Memorial creation is temporarily paused by the protocol. Please try again later.';
     if (chain?.id !== baseSepolia.id) {
       try {
-        await switchChainAsync({ chainId: baseSepolia.id });
+        if (switchChainAsync && connector) {
+          await switchChainAsync({ chainId: baseSepolia.id });
+        } else {
+          const preferred = externalWallet || embeddedWallet || wallets[0];
+          if (preferred?.switchChain) {
+            await preferred.switchChain(baseSepolia.id);
+          }
+        }
       } catch (switchErr) {
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
         return formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia to continue.');
@@ -1052,15 +1081,15 @@ export default function CreateMemorial() {
     return '';
   };
 
-  // The tx account is always the wagmi-connected address, which belongs to `connector`.
+  // The tx account prefers the wagmi-connected address and falls back to activeUserAddress.
   const sendCreateMemorialTx = ({ name, metadataTxId, isPublicFlag, fee }) => writeContractAsync({
     address: contractAddress,
     abi: CONTRACT_ABI,
     functionName: 'create_memorial',
     args: [name, metadataTxId, isPublicFlag],
     value: fee,
-    account: wagmiAddress,
-    connector,
+    account: wagmiAddress || activeUserAddress,
+    ...(connector ? { connector } : {}),
     chainId: baseSepolia.id,
   });
 
@@ -1092,7 +1121,7 @@ export default function CreateMemorial() {
 
       const walletError = await ensureWalletReady();
       if (walletError) { setError(walletError); return; }
-      const account = wagmiAddress;
+      const account = wagmiAddress || activeUserAddress;
 
       // Check fee + balance (incl. gas) BEFORE paid uploads so nothing is uploaded for a mint that cannot succeed
       const preflightFee = await fetchLatestFee();
@@ -1191,7 +1220,7 @@ export default function CreateMemorial() {
 
       const walletError = await ensureWalletReady();
       if (walletError) { setError(walletError); return; }
-      const account = wagmiAddress;
+      const account = wagmiAddress || activeUserAddress;
       const draftPublic = Boolean(targetDraft.isPublic ?? false);
 
       // A transaction for this draft was already broadcast: check its outcome before paying again
@@ -1389,7 +1418,7 @@ export default function CreateMemorial() {
   }
 
   /* ── Privy initializing / hydrating session ──────────────── */
-  if (!ready) {
+  if (!ready && !activeUserAddress) {
     return (
       <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
         <div className="max-w-sm text-center space-y-4 animate-fadeIn">
@@ -1401,13 +1430,40 @@ export default function CreateMemorial() {
   }
 
   /* ── Not connected ─────────────────────────────────────── */
-  if (!authenticated) {
+  if (!isConnected) {
+    const showMetaMaskDeepLink = isMobileWithoutEthereum();
     return (
       <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
         <div className="max-w-sm text-center space-y-5 animate-fadeIn">
           <span className="material-symbols-outlined text-5xl text-[#d8c2ba]">account_balance_wallet</span>
           <h2 className="text-2xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Connect Your Wallet</h2>
           <p className="text-[#53433e] text-sm">Please connect your wallet to create a memorial.</p>
+          <div className="pt-2 flex flex-col items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => connectWallet()}
+              className="w-full inline-flex items-center justify-center gap-2 bg-[#8a4f36] hover:bg-[#723f2b] text-white px-7 py-3.5 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">account_balance_wallet</span>
+              <span>Connect Wallet</span>
+            </button>
+            {showMetaMaskDeepLink && (
+              <a
+                href={getMetaMaskDappDeepLink()}
+                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl text-xs font-semibold uppercase tracking-wider text-[#8a4f36] bg-[#f5efe6] hover:bg-[#ebddd5] border border-[#d8c2ba]/70 transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">open_in_new</span>
+                <span>Open in MetaMask App</span>
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => login({ loginMethods: ['email'] })}
+              className="text-xs font-medium text-[#85736d] hover:text-[#8a4f36] transition-colors cursor-pointer pt-1"
+            >
+              Or sign in with Email
+            </button>
+          </div>
         </div>
       </div>
     );

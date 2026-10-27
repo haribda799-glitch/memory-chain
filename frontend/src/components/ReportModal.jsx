@@ -29,10 +29,10 @@ export default function ReportModal({
 }) {
   const chainId = useChainId();
   const contractAddress = getContractAddress(chainId);
-  const { address: wagmiAddress, isConnected, chain, connector } = useAccount();
+  const { address: wagmiAddress, chain, connector } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
-  const { user, login } = usePrivy();
+  const { user, connectWallet } = usePrivy();
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   // Single source of truth for the reporter address: prefer the wagmi account (the one that signs the tx),
   // fall back to Privy only when wagmi has none. Used for every read and for the localStorage key.
@@ -237,7 +237,7 @@ export default function ReportModal({
       console.log('[Report] Submit clicked, reason:', selectedReason);
       setError('');
 
-      if (!isConnected && !embeddedWallet) {
+      if (!activeAddress) {
         setError('Please connect your wallet first.');
         return;
       }
@@ -457,10 +457,10 @@ export default function ReportModal({
           {!activeAddress ? (
             <button
               type="button"
-              onClick={login}
+              onClick={() => connectWallet()}
               className="w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md flex items-center justify-center gap-2"
             >
-              <span className="material-symbols-outlined text-base">login</span>
+              <span className="material-symbols-outlined text-base">account_balance_wallet</span>
               <span>Connect Wallet</span>
             </button>
           ) : isSuccess || alreadyReported ? (

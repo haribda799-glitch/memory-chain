@@ -16,6 +16,7 @@ import { useMemorials } from '../utils/useMemorials';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { useNow } from '../hooks/useNow';
+import { isMobileWithoutEthereum, getMetaMaskDappDeepLink } from '../utils/mobileWallet';
 
 function SkeletonCard() {
   return (
@@ -86,7 +87,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
   const { writeContractAsync } = useWriteContract();
 
   const handleTogglePublic = async () => {
-    const isAuthorized = (ready && authenticated && !!activeAddress) || (!!wagmiAddress);
+    const isAuthorized = Boolean(activeAddress) || Boolean(wagmiAddress) || (ready && authenticated);
     if (!isAuthorized || !activeAddress) {
       alert("Please connect your wallet first.");
       return;
@@ -191,7 +192,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
 }
 
 export default function MyMemorials() {
-  const { ready, authenticated, user, login } = usePrivy();
+  const { ready, authenticated, user, login, connectWallet } = usePrivy();
   const { wallets } = useWallets();
   const { 
     address: wagmiAddress, 
@@ -201,11 +202,12 @@ export default function MyMemorials() {
   } = useAccount();
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  const address = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
+  const externalWallet = wallets.find((w) => w.walletClientType !== 'privy');
+  const address = wagmiAddress || externalWallet?.address || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
 
   // Track if auth/wallet is initializing or reconnecting
-  const isAuthLoading = !ready || isConnecting || isReconnecting;
-  const isConnected = (authenticated || isWagmiConnected) && Boolean(address);
+  const isAuthLoading = (!ready && !address) || isConnecting || isReconnecting;
+  const isConnected = Boolean(address) || ((authenticated || isWagmiConnected) && Boolean(address));
 
   const { memorials: allMemorials, isLoading, refetch, updateMemorial } = useMemorials();
 
@@ -257,14 +259,30 @@ export default function MyMemorials() {
               Connect your wallet to view, tend, and keep the flame alive for your companions.
             </p>
           </div>
-          <div>
+          <div className="flex flex-col items-center gap-2.5">
             <button
               type="button"
-              onClick={login}
+              onClick={() => connectWallet()}
               className="inline-flex items-center justify-center gap-2 bg-[#8a4f36] hover:bg-[#723f2b] text-white px-7 py-3.5 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-md cursor-pointer"
             >
-              <span className="material-symbols-outlined text-base">login</span>
+              <span className="material-symbols-outlined text-base">account_balance_wallet</span>
               <span>Connect Wallet</span>
+            </button>
+            {isMobileWithoutEthereum() && (
+              <a
+                href={getMetaMaskDappDeepLink()}
+                className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl text-xs font-semibold uppercase tracking-wider text-[#8a4f36] bg-[#f5efe6] hover:bg-[#ebddd5] border border-[#d8c2ba]/70 transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">open_in_new</span>
+                <span>Open in MetaMask App</span>
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => login({ loginMethods: ['email'] })}
+              className="text-xs font-medium text-[#85736d] hover:text-[#8a4f36] transition-colors cursor-pointer pt-1"
+            >
+              Or sign in with Email
             </button>
           </div>
         </div>

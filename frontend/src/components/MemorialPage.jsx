@@ -131,7 +131,7 @@ export default function MemorialPage() {
   const explorerUrl = getExplorerUrl(chainId);
   const tokenId = BigInt(id || 0);
 
-  const { authenticated, login, user } = usePrivy();
+  const { authenticated, connectWallet, user } = usePrivy();
   const { wallets } = useWallets();
 
   const { address: wagmiAddress } = useAccount();
@@ -140,6 +140,7 @@ export default function MemorialPage() {
   // Same priority as the transaction modals (the wagmi-connected account signs the txs),
   // so isOwner / isReported always refer to the address that actually sends transactions.
   const userAddress = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
+  const isWalletReady = Boolean(userAddress) || authenticated;
 
   const [metadata, setMetadata] = useState(null);
   const [showCandleModal, setShowCandleModal] = useState(false);
@@ -154,20 +155,20 @@ export default function MemorialPage() {
   }, [id]);
 
   const handleIgniteClick = () => {
-    if (!authenticated) {
+    if (!isWalletReady) {
       setPendingCandleOpen(true);
-      login();
+      connectWallet();
       return;
     }
     setShowCandleModal(true);
   };
 
   useEffect(() => {
-    if (authenticated && userAddress && pendingCandleOpen) {
+    if (isWalletReady && userAddress && pendingCandleOpen) {
       setPendingCandleOpen(false);
       setShowCandleModal(true);
     }
-  }, [authenticated, userAddress, pendingCandleOpen]);
+  }, [isWalletReady, userAddress, pendingCandleOpen]);
 
   const { data: memorialRaw, isLoading } = useReadContract({
     address: contractAddress, abi: CONTRACT_ABI, functionName: 'memorials', args: [tokenId],

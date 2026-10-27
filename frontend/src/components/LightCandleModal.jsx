@@ -183,6 +183,8 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
         await switchChainAsync({ chainId: baseSepolia.id });
       } else if (embeddedWallet?.switchChain) {
         await embeddedWallet.switchChain(baseSepolia.id);
+      } else if (wallets[0]?.switchChain) {
+        await wallets[0].switchChain(baseSepolia.id);
       }
       return true;
     } catch (switchErr) {
@@ -215,7 +217,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       return;
     }
 
-    const isAuthorized = (isConnected && !!wagmiAddress) || (ready && authenticated && !!activeAddress);
+    const isAuthorized = Boolean(activeAddress) || (isConnected && !!wagmiAddress) || (ready && authenticated && !!activeAddress);
     if (!isAuthorized || !activeAddress) {
       console.warn('[Candle] Wallet not connected or not ready yet');
       setError('Please connect your wallet first.');

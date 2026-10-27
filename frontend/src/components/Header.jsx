@@ -1,25 +1,56 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
-import { useDisconnect } from 'wagmi';
+import { useSetActiveWallet } from '@privy-io/wagmi';
+import { useAccount, useDisconnect, useReconnect } from 'wagmi';
 import { baseSepolia } from 'viem/chains';
+import {
+  isMobileWithoutEthereum,
+  getMetaMaskDappDeepLink,
+  syncReturningMobileWallet,
+  closeStuckPrivyModalIfConnected,
+} from '../utils/mobileWallet';
 
 export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const burgerButtonRef = useRef(null);
 
-  // Privy Hooks
-  const { ready, authenticated, login, logout, exportWallet, user, createWallet } = usePrivy();
+  // Privy & Wagmi Hooks
+  const {
+    ready,
+    authenticated,
+    login,
+    connectWallet,
+    logout,
+    exportWallet,
+    user,
+    createWallet,
+    walletConnectors,
+  } = usePrivy();
   const { wallets } = useWallets();
+  const { setActiveWallet } = useSetActiveWallet();
+  const { address: wagmiAddress } = useAccount();
+  const { reconnect } = useReconnect();
   const { fundWallet } = useFundWallet();
   const { disconnect } = useDisconnect();
 
-  // Combined logout: clear Wagmi connector cache first, then end Privy session
+  // Combined logout: clear external wallet sessions, Wagmi connector cache, and Privy session
   const handleLogout = async (closeFn) => {
     try {
-      disconnect();        // 1. Kills Wagmi connector cache (MetaMask / injected)
-      await logout();     // 2. Ends Privy session
+      for (const w of wallets) {
+        if (w.walletClientType !== 'privy' && typeof w.disconnect === 'function') {
+          try {
+            await w.disconnect();
+          } catch {
+            // ignore individual wallet disconnect error
+          }
+        }
+      }
+      disconnect(); // 1. Kills Wagmi connector cache (MetaMask / WalletConnect / injected)
+      if (authenticated) {
+        await logout(); // 2. Ends Privy SIWE/email session if active
+      }
     } catch (err) {
       console.error('[Logout] Error during logout:', err);
     } finally {
@@ -28,19 +59,64 @@ export default function Header() {
   };
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  const displayAddress = embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
-  const isUserAuthenticated = ready && authenticated;
+  const externalWallet = wallets.find((w) => w.walletClientType !== 'privy');
+  const displayAddress =
+    wagmiAddress ||
+    externalWallet?.address ||
+    embeddedWallet?.address ||
+    user?.wallet?.address ||
+    wallets[0]?.address;
+
+  // Treat the user as connected as soon as Wagmi or Privy useWallets() provides an active address,
+  // even when external wallet connection ran in 1-step connectWallet() mode (authenticated === false).
+  const isUserAuthenticated = Boolean(displayAddress) || (ready && authenticated);
+  const showMobileMetaMaskDeepLink = isMobileWithoutEthereum();
 
   useEffect(() => {
-    if (authenticated && !embeddedWallet && !user?.wallet) {
+    if (authenticated && !embeddedWallet && !externalWallet && !wagmiAddress && !user?.wallet) {
       createWallet();
     }
-  }, [authenticated, embeddedWallet, user]);
+  }, [authenticated, embeddedWallet, externalWallet, wagmiAddress, user, createWallet]);
+
+  // Keep Wagmi synced whenever Privy's useWallets() receives a newly connected external wallet
+  // and automatically dismiss any Privy modal stuck on "Waiting for MetaMask".
+  useEffect(() => {
+    const active = externalWallet || embeddedWallet || wallets[0];
+    if (active && !wagmiAddress && typeof setActiveWallet === 'function') {
+      setActiveWallet(active).catch(() => {});
+    }
+    if (displayAddress) {
+      closeStuckPrivyModalIfConnected(true);
+    }
+  }, [externalWallet, embeddedWallet, wallets, wagmiAddress, setActiveWallet, displayAddress]);
+
+  // Recover WalletConnect / mobile MetaMask connection immediately when returning from MetaMask app to Chrome
+  const handleVisibilityOrFocus = useCallback(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    syncReturningMobileWallet({
+      walletConnectors,
+      wallets,
+      setActiveWallet,
+      reconnect,
+    });
+  }, [walletConnectors, wallets, setActiveWallet, reconnect]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return undefined;
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    window.addEventListener('pageshow', handleVisibilityOrFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      window.removeEventListener('pageshow', handleVisibilityOrFocus);
+    };
+  }, [handleVisibilityOrFocus]);
 
   // Clear residual browser focus on the mobile burger button when Privy modal closes or auth state changes
   useEffect(() => {
     burgerButtonRef.current?.blur();
-  }, [authenticated, menuOpen]);
+  }, [authenticated, isUserAuthenticated, menuOpen]);
 
   const networkName = 'Base Sepolia';
   const truncate = (addr) => addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : '';
@@ -166,17 +242,31 @@ export default function Header() {
                   )}
                 </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    login();
-                  }}
-                  disabled={!ready}
-                  className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
-                >
-                  Connect Wallet
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      connectWallet();
+                    }}
+                    disabled={!ready}
+                    className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
+                  >
+                    Connect Wallet
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      login({ loginMethods: ['email'] });
+                    }}
+                    disabled={!ready}
+                    title="Sign in with Email"
+                    className="border border-outline-variant/30 text-on-surface-variant px-3.5 py-2 rounded-full text-xs hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none"
+                  >
+                    Email
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -232,19 +322,46 @@ export default function Header() {
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  setMenuOpen(false);
-                  burgerButtonRef.current?.blur();
-                  login();
-                }}
-                disabled={!ready}
-                className="text-left text-primary font-bold text-body-md disabled:opacity-50 pl-2 outline-none focus:outline-none"
-              >
-                Connect Wallet
-              </button>
+              <div className="flex flex-col space-y-3 pl-2">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setMenuOpen(false);
+                    burgerButtonRef.current?.blur();
+                    connectWallet();
+                  }}
+                  disabled={!ready}
+                  className="text-left text-primary font-bold text-body-md disabled:opacity-50 flex items-center gap-2 outline-none focus:outline-none"
+                >
+                  <span className="material-symbols-outlined text-[18px]">account_balance_wallet</span>
+                  <span>Connect Wallet</span>
+                </button>
+                {showMobileMetaMaskDeepLink && (
+                  <a
+                    href={getMetaMaskDappDeepLink()}
+                    onClick={() => setMenuOpen(false)}
+                    className="text-left text-[#8a4f36] font-semibold text-sm flex items-center gap-2 hover:underline"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">open_in_new</span>
+                    <span>Open in MetaMask App</span>
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setMenuOpen(false);
+                    burgerButtonRef.current?.blur();
+                    login({ loginMethods: ['email'] });
+                  }}
+                  disabled={!ready}
+                  className="text-left text-on-surface-variant text-sm disabled:opacity-50 flex items-center gap-2 outline-none focus:outline-none"
+                >
+                  <span className="material-symbols-outlined text-[18px]">mail</span>
+                  <span>Sign in with Email</span>
+                </button>
+              </div>
             )}
           </div>
         )}
