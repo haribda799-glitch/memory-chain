@@ -940,8 +940,18 @@ export default function CreateMemorial() {
     }
 
     const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
-    const detectedAnimalList = predictions.filter((p) => animalClasses.includes(p.class) && p.score >= 0.25);
+    const detectedAnimalList = predictions
+      .filter((p) => animalClasses.includes(p.class) && p.score >= 0.25)
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
     const hasAnimal = predictions.length === 0 ? true : detectedAnimalList.length > 0;
+    const topAnimalClass = detectedAnimalList[0]?.class || '';
+    const cocoToSpeciesMap = {
+      dog: 'Dog',
+      cat: 'Cat',
+      bird: 'Bird',
+      horse: 'Horse',
+    };
+    const detectedSpecies = cocoToSpeciesMap[topAnimalClass] || '';
 
     const hasCocoPerson = predictions.some((p) => p.class === 'person' && p.score >= 0.40);
     // Real human faces in BlazeFace have confidence >= 0.90; animal muzzles (like dogs/cats) false-positive around 0.70-0.85
@@ -955,6 +965,7 @@ export default function CreateMemorial() {
     return {
       hasPerson,
       hasAnimal,
+      detectedSpecies,
     };
   }, []);
 
@@ -1004,6 +1015,9 @@ export default function CreateMemorial() {
         isAiWarm = true;
         setDetectedPerson(Boolean(result.hasPerson));
         setDetectedAnimal(Boolean(result.hasAnimal));
+        if (result.detectedSpecies) {
+          setSpecies((prev) => prev || result.detectedSpecies);
+        }
         setCheckStatus('accepted');
       } else {
         console.warn('[AI Analysis] Timed out or unavailable after retry — check skipped.');

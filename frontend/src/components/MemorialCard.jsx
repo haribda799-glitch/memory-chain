@@ -55,7 +55,7 @@ export default function MemorialCard({
 
   const txId = arweaveUri || arweaveTxId || '';
   const [metadata, setMetadata] = useState(null);
-  const [isMetaLoading, setIsMetaLoading] = useState(Boolean(txId));
+  const [, setIsMetaLoading] = useState(Boolean(txId));
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [isMining, setIsMining] = useState(false);
@@ -345,7 +345,8 @@ export default function MemorialCard({
 
   // --- Dates ---
   const attrs       = Array.isArray(metadata?.attributes) ? metadata.attributes : [];
-  const findAttr    = (trait) => attrs.find((a) => a.trait_type === trait)?.value;
+  const findAttr    = (trait) =>
+    attrs.find((a) => String(a?.trait_type || '').trim().toLowerCase() === trait.toLowerCase())?.value;
   const birthYear   = metadata?.birth_year   || findAttr('Birth Year');
   const passingYear = metadata?.passing_year || findAttr('Passing Year');
 
@@ -359,24 +360,28 @@ export default function MemorialCard({
         : '');
 
   // --- Badges ---
-  const rawSpecies = metadata?.species || findAttr('Species') || propSpecies || memorial?.species || null;
-  const rawCategory = metadata?.category || propCategory || memorial?.category || null;
-  const breed = metadata?.breed || findAttr('Breed') || propBreed || memorial?.breed || null;
-
-  const candidateSpecies = (rawSpecies && String(rawSpecies).toLowerCase() !== 'companion') ? rawSpecies : null;
-  const displayCategoryOrSpecies = (
-    candidateSpecies ||
-    rawCategory ||
-    rawSpecies ||
-    'COMPANION'
-  ).toUpperCase();
+  const rawSpecies =
+    metadata?.species ||
+    findAttr('Species') ||
+    findAttr('Animal') ||
+    propSpecies ||
+    propCategory ||
+    memorial?.metadata?.species ||
+    memorial?.species ||
+    '';
+  const cleanSpecies = /^(companion|other|unknown|none)$/i.test(String(rawSpecies).trim())
+    ? ''
+    : String(rawSpecies).trim();
+  const breed = String(
+    metadata?.breed || findAttr('Breed') || propBreed || memorial?.breed || ''
+  ).trim();
 
   return (
     <>
       <div className="bg-surface rounded-[16px] border border-outline-variant/20 overflow-hidden group hover:shadow-sm transition-shadow duration-300 flex flex-col h-full">
-        <Link to={`/memorial/${tokenId}`} className="no-underline block flex-grow">
+        <Link to={`/memorial/${tokenId}`} className="no-underline flex flex-col flex-grow">
           {/* Photo */}
-          <div className="relative h-64 overflow-hidden">
+          <div className="relative h-64 shrink-0 overflow-hidden">
             <img
               src={imageUrl || PLACEHOLDER}
               alt={`Memorial for ${petName}`}
@@ -424,31 +429,28 @@ export default function MemorialCard({
                 {displayDate && (
                   <p className="font-body-sm text-body-sm text-on-surface-variant mt-1">{displayDate}</p>
                 )}
-                {/* Dynamic species / breed badges */}
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {isMetaLoading && !rawCategory && !rawSpecies ? (
-                    <span className="px-3 py-1 rounded-full bg-secondary-container/60 text-on-secondary-container/70 font-label-md text-label-md text-[10px] tracking-wider uppercase inline-flex items-center gap-1.5 animate-pulse">
-                      <span className="w-1.5 h-1.5 rounded-full bg-on-secondary-container/50 animate-ping" />
-                      <span>Loading…</span>
-                    </span>
-                  ) : (
-                    <span className="px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md text-[10px] tracking-wider uppercase">
-                      {displayCategoryOrSpecies}
-                    </span>
-                  )}
-                  {breed && (
-                    <span className="px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md text-[10px] tracking-wider uppercase">
-                      {breed}
-                    </span>
-                  )}
-                </div>
+                {/* Dynamic species / breed badges (only shown when species or breed is actually set) */}
+                {(cleanSpecies || breed) && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {cleanSpecies && (
+                      <span className="px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md text-[10px] tracking-wider uppercase">
+                        {cleanSpecies.toUpperCase()}
+                      </span>
+                    )}
+                    {breed && (
+                      <span className="px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-md text-label-md text-[10px] tracking-wider uppercase">
+                        {breed}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
-            <div className="mt-auto pt-4 border-t border-outline-variant/15 space-y-3">
+            <div className="mt-auto pt-4 border-t border-outline-variant/15 flex flex-col gap-3">
               {isBurning && totalCandlesLit > 0 ? (
                 <div
-                  className="w-full rounded-2xl py-2.5 px-3 flex flex-col items-center justify-center transition-all duration-300 group-hover:border-amber-400/40"
+                  className="w-full min-h-[78px] rounded-2xl py-2.5 px-3 flex flex-col items-center justify-center transition-all duration-300 group-hover:border-amber-400/40"
                   style={{
                     background: 'radial-gradient(circle at 50% 50%, rgba(251,191,36,0.14) 0%, rgba(250,247,242,0) 70%)',
                     border: '1px solid rgba(245,158,11,0.25)',
@@ -460,7 +462,7 @@ export default function MemorialCard({
                 </div>
               ) : (
                 <div
-                  className="w-full rounded-2xl py-2.5 px-3 flex flex-col items-center justify-center transition-all duration-300 border border-outline-variant/20 bg-[#F5efe6]/35 group-hover:bg-[#F5efe6]/70 group-hover:border-[#d8c2ba]/60"
+                  className="w-full min-h-[78px] rounded-2xl py-2.5 px-3 flex flex-col items-center justify-center transition-all duration-300 border border-outline-variant/20 bg-[#F5efe6]/35 group-hover:bg-[#F5efe6]/70 group-hover:border-[#d8c2ba]/60"
                   title="The flame has rested · Click to rekindle"
                 >
                   <CandleAltar totalCandles={totalCandlesLit} expiryTimestamp={0} isBurning={false} />
@@ -469,10 +471,14 @@ export default function MemorialCard({
 
               {/* Owner Visibility Controls in Card Body */}
               {isOwner && onToggleVisibility && (
-                <div className="pt-3 border-t border-outline-variant/15 w-full">
+                <div className="pt-3 border-t border-outline-variant/15 w-full mt-auto">
                   {isBannedEffective ? (
-                    <div className="text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 w-full shadow-sm">
-                      🔒 Visibility locked due to admin ban
+                    <div className="text-center p-2.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200 w-full shadow-xs flex items-center justify-center gap-1.5">
+                      <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                      </svg>
+                      <span>Visibility locked due to admin ban</span>
                     </div>
                   ) : (
                     <button
@@ -483,12 +489,12 @@ export default function MemorialCard({
                         onToggleVisibility();
                       }}
                       disabled={isTogglingVisibility}
-                      className={`w-full py-2 px-3 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2 ${
+                      className={`w-full py-2.5 px-3 rounded-xl text-xs font-semibold transition-all shadow-xs flex items-center justify-center gap-2 ${
                         isTogglingVisibility
                           ? 'bg-amber-100 text-amber-900 border border-amber-300 opacity-80 cursor-wait'
-                          : isPublic 
-                            ? 'bg-green-100 text-green-800 hover:bg-green-200 cursor-pointer' 
-                            : 'bg-gray-100 text-gray-800 hover:bg-gray-200 cursor-pointer'
+                          : isPublic
+                            ? 'bg-[#F5EFE6] text-[#7C5843] border border-[#E5D7C3] hover:bg-[#EFE5D8] cursor-pointer'
+                            : 'bg-stone-100 text-stone-600 border border-stone-200/80 hover:bg-stone-200/70 cursor-pointer'
                       }`}
                     >
                       {isTogglingVisibility ? (
@@ -500,9 +506,24 @@ export default function MemorialCard({
                           <span>Updating...</span>
                         </>
                       ) : isPublic ? (
-                        '🌐 Public (Click to Hide)'
+                        <>
+                          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="9" />
+                            <path d="M3.6 9h16.8" />
+                            <path d="M3.6 15h16.8" />
+                            <path d="M11.5 3a17 17 0 0 0 0 18" />
+                            <path d="M12.5 3a17 17 0 0 1 0 18" />
+                          </svg>
+                          <span>Public (Click to Hide)</span>
+                        </>
                       ) : (
-                        '🔒 Hidden from Gallery (Click to Publish)'
+                        <>
+                          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <rect x="4" y="11" width="16" height="10" rx="2" ry="2" />
+                            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+                          </svg>
+                          <span>Hidden from Gallery (Click to Publish)</span>
+                        </>
                       )}
                     </button>
                   )}

@@ -72,17 +72,6 @@ export function useMemorials() {
           const isHiddenStruct = Array.isArray(raw) ? Boolean(raw[5]) : Boolean(raw.is_hidden ?? raw.isHidden);
           const isBannedStruct = Array.isArray(raw) ? Boolean(raw[6]) : Boolean(raw.is_banned ?? raw.isBanned);
 
-          const rawMemorial = {
-            owner,
-            arweaveUri,
-            petName,
-            createdAt,
-            isPublic,
-            isHidden: isHiddenStruct,
-            isBanned: isBannedStruct,
-            category: 'other',
-          };
-
           let isVisible = isPublic && !isHiddenStruct && !isBannedStruct;
           try {
             isVisible = await publicClient.readContract({
@@ -123,9 +112,9 @@ export function useMemorials() {
           let metadata = null;
           let photoUrl = null;
           let story = '';
-          let species = 'companion';
+          let species = '';
           let breed = '';
-          let category = rawMemorial.category || 'other';
+          let category = '';
           let isMetadataLoaded = false;
           let isMetadataLoading = false;
 
@@ -145,20 +134,22 @@ export function useMemorials() {
                 photoUrl = metadata?.image || metadata?.photo_url || metadata?.photoUrl || null;
                 story = metadata?.description || metadata?.story || metadata?.epitaph || '';
                 const attrs = Array.isArray(metadata?.attributes) ? metadata.attributes : [];
-                const findAttr = (trait) => attrs.find((a) => a.trait_type === trait)?.value;
-                const attrSpecies = findAttr('Species');
+                const findAttr = (trait) =>
+                  attrs.find((a) => String(a?.trait_type || '').trim().toLowerCase() === trait.toLowerCase())?.value;
+                const attrSpecies = findAttr('Species') || findAttr('Animal') || findAttr('Type');
                 const attrBreed = findAttr('Breed');
-                species = metadata?.species || attrSpecies || 'companion';
-                breed = metadata?.breed || attrBreed || '';
-                category = metadata?.category || (species && species.toLowerCase() !== 'companion' ? species.toLowerCase() : rawMemorial.category || 'other');
+                const rawSp = String(metadata?.species || attrSpecies || '').trim();
+                species = /^(companion|other|unknown|none)$/i.test(rawSp) ? '' : rawSp;
+                breed = String(metadata?.breed || attrBreed || '').trim();
+                category = String(metadata?.category || species || '').trim().toLowerCase();
                 isMetadataLoaded = true;
               } else {
                 console.warn(`[useMemorials] HTTP ${res.status} fetching Arweave metadata for #${i}: ${fetchUrl}`);
                 photoUrl = null;
                 story = 'Metadata temporarily unavailable';
-                species = 'companion';
+                species = '';
                 breed = '';
-                category = rawMemorial.category || 'other';
+                category = '';
                 isMetadataLoaded = true;
               }
             } catch (fetchErr) {
@@ -166,9 +157,9 @@ export function useMemorials() {
               console.warn(`[useMemorials] Network error fetching Arweave metadata for #${i}:`, fetchErr);
               photoUrl = null;
               story = 'Metadata temporarily unavailable';
-              species = 'companion';
+              species = '';
               breed = '';
-              category = rawMemorial.category || 'other';
+              category = '';
               isMetadataLoaded = true;
             } finally {
               isMetadataLoading = false;
@@ -192,8 +183,8 @@ export function useMemorials() {
             story: story || (metadata ? '' : 'Metadata temporarily unavailable'),
             description: story || (metadata ? '' : 'Metadata temporarily unavailable'),
             metadata,
-            category: category || rawMemorial.category || 'other',
-            species: species || 'companion',
+            category: category || '',
+            species: species || '',
             breed: breed || '',
             isMetadataLoaded: true,
             isMetadataLoading: false,
@@ -212,7 +203,6 @@ export function useMemorials() {
           };
         } catch (itemErr) {
           console.error(`[useMemorials] Error loading memorial #${i}:`, itemErr);
-          const rawMemorial = { category: 'other' };
           // Safe fallback memorial object on failure
           return {
             id: i,
@@ -228,8 +218,8 @@ export function useMemorials() {
             story: 'Metadata temporarily unavailable',
             description: 'Metadata temporarily unavailable',
             metadata: null,
-            category: rawMemorial.category || 'other',
-            species: 'companion',
+            category: '',
+            species: '',
             breed: '',
             isMetadataLoaded: true,
             isMetadataLoading: false,

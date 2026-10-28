@@ -258,9 +258,9 @@ export default function Header() {
                     }}
                     disabled={!ready}
                     title="Sign in with Email — automatic built-in wallet"
-                    className="bg-primary-container text-on-primary-container px-5 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 inline-flex items-center gap-1.5 cursor-pointer"
+                    className="bg-[#c27357] hover:bg-[#8a4f36] text-white px-5 py-2 rounded-full text-xs font-semibold uppercase tracking-wider transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
                   >
-                    <span className="material-symbols-outlined text-[16px]">mail</span>
+                    <span className="material-symbols-outlined text-[16px] text-white">mail</span>
                     <span>Sign in with Email</span>
                   </button>
                   <button
@@ -271,7 +271,7 @@ export default function Header() {
                     }}
                     disabled={!ready}
                     title="Connect an external Web3 wallet (MetaMask, WalletConnect)"
-                    className="border border-outline-variant/40 text-on-surface-variant px-3.5 py-2 rounded-full text-xs font-medium hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none inline-flex items-center gap-1.5 cursor-pointer"
+                    className="border border-outline-variant/40 text-on-surface-variant px-4 py-2 rounded-full text-xs font-semibold uppercase tracking-wider hover:bg-surface-tint hover:text-white transition-colors disabled:opacity-50 outline-none focus:outline-none inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <span className="material-symbols-outlined text-[15px]">account_balance_wallet</span>
                     <span>Connect Wallet</span>

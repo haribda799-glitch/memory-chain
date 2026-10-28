@@ -11,16 +11,16 @@ export default function CandleAltar({
   const totalCandles = Math.max(0, Number(memorial?.total_candles_lit ?? propTotalCandles ?? 0));
   const isBurning = propIsBurning !== undefined ? propIsBurning : (expiresAt > now);
 
-  const maxDisplay = 7;
+  const maxDisplay = 5;
   const flameCount = (isBurning && totalCandles > 0) ? Math.min(totalCandles, maxDisplay) : 0;
   const extraCount = (isBurning && totalCandles > maxDisplay) ? totalCandles - maxDisplay : 0;
 
   return (
-    <div className={`w-full flex flex-col items-center py-1 ${className}`}>
+    <div className={`w-full flex flex-col items-center justify-center py-0.5 ${className}`}>
       {/* ── Active Flame Row or Extinguished Status ── */}
       {isBurning && totalCandles > 0 ? (
         <>
-          <div className="flex items-center justify-center gap-2.5 py-1">
+          <div className="flex items-center justify-center gap-2 py-0.5">
             {Array.from({ length: flameCount }).map((_, index) => (
               <span
                 key={index}
@@ -56,53 +56,64 @@ export default function CandleAltar({
             ))}
 
             {extraCount > 0 && (
-              <span className="text-[10px] font-semibold tracking-wider px-2 py-0.5 rounded-full bg-amber-100/90 text-amber-900 border border-amber-300/50 shadow-sm">
-                +{extraCount} more
+              <span className="text-[10px] font-semibold tracking-wider px-2 py-0.5 rounded-full bg-amber-100/90 text-amber-900 border border-amber-300/50 shadow-xs">
+                +{extraCount}
               </span>
             )}
           </div>
 
           {/* Subtitle for burning state */}
           <p
-            className="text-[11px] text-[#7A6B60] text-center mt-1 tracking-wide"
+            className="text-[11px] leading-snug text-[#7A6B60] text-center mt-1 tracking-wide"
             style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
           >
             {totalCandles} {totalCandles === 1 ? 'candle' : 'candles'} burning together in loving memory
           </p>
         </>
       ) : (
-        /* Muted Extinguished Status */
-        <div className="flex items-center justify-center gap-1.5 py-1 text-[#8A7A6E]">
+        /* Symmetrically centered extinguished state */
+        <div className="flex flex-col items-center justify-center text-center gap-1 text-[#8A7A6E]">
           <svg
-            width="14"
-            height="18"
-            viewBox="0 0 15 22"
+            width="15"
+            height="19"
+            viewBox="0 0 16 22"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
-            className="opacity-50 flex-shrink-0"
+            className="text-[#9E8E80] opacity-75"
+            aria-hidden="true"
           >
             <path
-              d="M7.5 1.5C7.5 1.5 2 7.5 2 13C2 16.5 4.5 19.5 7.5 19.5C10.5 19.5 13 16.5 13 13C13 7.5 7.5 1.5 7.5 1.5Z"
+              d="M8 2C8 2 3 7.4 3 12.4C3 15.6 5.2 18.2 8 18.2C10.8 18.2 13 15.6 13 12.4C13 7.4 8 2 8 2Z"
               stroke="currentColor"
-              strokeWidth="1.2"
-              strokeDasharray="2.5 1.5"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
               fill="currentColor"
-              fillOpacity="0.06"
+              fillOpacity="0.1"
             />
             <path
-              d="M7.5 19.5V14"
+              d="M8 10.2C8.9 11.6 9.6 12.8 9.6 14C9.6 15.1 8.9 15.9 8 15.9C7.1 15.9 6.4 15.1 6.4 14C6.4 12.8 7.1 11.6 8 10.2Z"
+              fill="currentColor"
+              fillOpacity="0.28"
+            />
+            <path
+              d="M5.5 20.2H10.5"
               stroke="currentColor"
-              strokeWidth="1.2"
+              strokeWidth="1.3"
               strokeLinecap="round"
             />
-            <circle cx="7.5" cy="8" r="1.5" fill="currentColor" fillOpacity="0.25" />
           </svg>
-          <span
-            className="text-xs text-[#8A7A6E] italic tracking-wide text-center"
+          <div
+            className="text-center leading-tight"
             style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
           >
-            The flame has rested · {totalCandles} {totalCandles === 1 ? 'candle' : 'candles'} lit in loving memory
-          </span>
+            <p className="text-[11.5px] text-[#7D6E62] italic tracking-wide">
+              The flame has rested
+            </p>
+            <p className="text-[10.5px] text-[#9A8B7E] tracking-wide mt-0.5">
+              {totalCandles} {totalCandles === 1 ? 'candle' : 'candles'} lit in loving memory
+            </p>
+          </div>
         </div>
       )}
 

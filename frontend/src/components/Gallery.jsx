@@ -47,18 +47,26 @@ export default function Gallery() {
       const isVisible = m.isVisible !== undefined ? m.isVisible : (!m.isHidden && !m.isBanned && m.isPublic);
       if (!isVisible || !m.arweaveUri || metadataMap[m.arweaveUri]) return;
 
+      if (m.metadata && typeof m.metadata === 'object') {
+        setMetadataMap((prev) => ({
+          ...prev,
+          [m.arweaveUri]: m.metadata,
+        }));
+        return;
+      }
+
       fetch(getArweaveUrl(m.arweaveUri))
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           setMetadataMap((prev) => ({
             ...prev,
-            [m.arweaveUri]: data || { species: 'companion', category: 'other' },
+            [m.arweaveUri]: data || {},
           }));
         })
         .catch(() => {
           setMetadataMap((prev) => ({
             ...prev,
-            [m.arweaveUri]: { species: 'companion', category: 'other' },
+            [m.arweaveUri]: {},
           }));
         });
     });
@@ -73,17 +81,19 @@ export default function Gallery() {
         const isVisible = m.isVisible !== undefined ? m.isVisible : (!m.isHidden && !m.isBanned && m.isPublic);
         if (!isVisible) return; // Moderation & Privacy filters (is_memorial_visible)
 
-        const meta = metadataMap[m.arweaveUri] || {};
+        const meta = metadataMap[m.arweaveUri] || m.metadata || {};
         const description = meta.description || meta.epitaph || m.description || m.story || '';
         const attrs = Array.isArray(meta.attributes) ? meta.attributes : [];
-        const findAttr = (trait) => attrs.find((a) => a.trait_type === trait)?.value;
-        const metaSpecies = meta.species || findAttr('Species');
-        const metaBreed = meta.breed || findAttr('Breed');
-        const metaCategory = meta.category;
+        const findAttr = (trait) =>
+          attrs.find((a) => String(a?.trait_type || '').trim().toLowerCase() === trait.toLowerCase())?.value;
+        const rawSpeciesVal = String(meta.species || findAttr('Species') || findAttr('Animal') || m.species || '').trim();
+        const cleanSpecies = /^(companion|other|unknown|none)$/i.test(rawSpeciesVal) ? '' : rawSpeciesVal;
+        const metaBreed = String(meta.breed || findAttr('Breed') || m.breed || '').trim();
+        const metaCategory = String(meta.category || m.category || '').trim();
 
-        const species = String(metaSpecies || m.species || 'companion').toLowerCase();
-        const breed = String(metaBreed || m.breed || '').toLowerCase();
-        const category = String(metaCategory || m.category || (species !== 'companion' ? species : 'other')).toLowerCase();
+        const species = cleanSpecies;
+        const breed = metaBreed;
+        const category = (cleanSpecies || metaCategory).toLowerCase();
 
         items.push({
           tokenId: m.tokenId || m.id,
@@ -108,17 +118,18 @@ export default function Gallery() {
     return items;
   }, [rawMemorials, metadataMap]);
 
-  // Dynamic category pill counts
+  // Dynamic category pill counts (case-insensitive matching for dog/Dog/Dogs, cat/Cat/Cats, horse/Horse/Horses)
   const categoryCounts = useMemo(() => {
     let dog = 0, cat = 0, horse = 0, other = 0;
     allMemorials.forEach((m) => {
-      const sp = (m.species || '').toLowerCase();
-      const br = (m.breed || '').toLowerCase();
-      const catVal = (m.category || '').toLowerCase();
+      const sp = String(m.species || '').trim().toLowerCase();
+      const br = String(m.breed || '').trim().toLowerCase();
+      const catVal = String(m.category || '').trim().toLowerCase();
+      const combined = `${sp} ${br} ${catVal}`;
 
-      const isDog = sp.includes('dog') || br.includes('dog') || catVal.includes('dog');
-      const isCat = sp.includes('cat') || br.includes('cat') || catVal.includes('cat');
-      const isHorse = sp.includes('horse') || br.includes('horse') || catVal.includes('horse');
+      const isDog = /\bdogs?\b|canine|puppy|hound|retriever|terrier|shepherd|beagle|poodle|bulldog|husky|pug|corgi|labrador|dachshund|chihuahua|rottweiler|boxer|doberman|shiba|maltese|spaniel|collie|akita|samoyed/.test(combined);
+      const isCat = /\bcats?\b|feline|kitten|siamese|persian|maine coon|ragdoll|bengal|sphynx|british shorthair|scottish fold/.test(combined);
+      const isHorse = /\bhorses?\b|equine|stallion|mare|pony|foal|mustang|arabian|thoroughbred/.test(combined);
       if (isDog) dog++;
       else if (isCat) cat++;
       else if (isHorse) horse++;
@@ -147,13 +158,14 @@ export default function Gallery() {
     // 2. Category filter
     if (selectedCategory !== 'all') {
       result = result.filter((m) => {
-        const sp = (m.species || '').toLowerCase();
-        const br = (m.breed || '').toLowerCase();
-        const catVal = (m.category || '').toLowerCase();
+        const sp = String(m.species || '').trim().toLowerCase();
+        const br = String(m.breed || '').trim().toLowerCase();
+        const catVal = String(m.category || '').trim().toLowerCase();
+        const combined = `${sp} ${br} ${catVal}`;
 
-        const isDog = sp.includes('dog') || br.includes('dog') || catVal.includes('dog');
-        const isCat = sp.includes('cat') || br.includes('cat') || catVal.includes('cat');
-        const isHorse = sp.includes('horse') || br.includes('horse') || catVal.includes('horse');
+        const isDog = /\bdogs?\b|canine|puppy|hound|retriever|terrier|shepherd|beagle|poodle|bulldog|husky|pug|corgi|labrador|dachshund|chihuahua|rottweiler|boxer|doberman|shiba|maltese|spaniel|collie|akita|samoyed/.test(combined);
+        const isCat = /\bcats?\b|feline|kitten|siamese|persian|maine coon|ragdoll|bengal|sphynx|british shorthair|scottish fold/.test(combined);
+        const isHorse = /\bhorses?\b|equine|stallion|mare|pony|foal|mustang|arabian|thoroughbred/.test(combined);
         if (selectedCategory === 'dog') return isDog;
         if (selectedCategory === 'cat') return isCat;
         if (selectedCategory === 'horse') return isHorse;
@@ -186,10 +198,16 @@ export default function Gallery() {
         <div className="absolute inset-0 z-0">
           <img
             alt="Hero background"
-            className="w-full h-full object-cover opacity-90"
+            className="w-full h-full object-cover object-[65%_center] opacity-95"
             src="https://lh3.googleusercontent.com/aida-public/AB6AXuDu5JCtYBQCGHxS5qbJCGOcTajrmvY_TBDdGeeEONM6t7A2e7Co2fBYROf8rqlRuRBZOgGJHLOQYnwaqJhdJyicxxv_bWDSDp5NBZN_dCxjVw3FETh7zEqKtVabByMFexHpU_4JLG1SDV48ugDHNzaREVwVxpZK3gFiM594mZbD_QCAoRU4-5MoIFmMb7NB6ZWuG40qCqSVnTCvEkEyHNpAId4jLjrLXDfS65tenaRaX1ObCg_b_gC5spbXOOoelVF_H6oHcxil0q8"
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-surface-container-low via-surface-container-low/80 to-transparent"></div>
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                'linear-gradient(90deg, rgba(245, 243, 240, 0.92) 0%, rgba(245, 243, 240, 0.68) 24%, rgba(245, 243, 240, 0.22) 42%, rgba(245, 243, 240, 0) 58%)',
+            }}
+          />
         </div>
         <div className="relative z-10 max-w-container-max mx-auto w-full grid grid-cols-1 md:grid-cols-2 gap-gutter">
           <div className="flex flex-col justify-center space-y-stack-md py-20">
@@ -202,7 +220,7 @@ export default function Gallery() {
             <div className="pt-4">
               <button
                 onClick={() => navigate('/create')}
-                className="bg-primary-container text-on-primary-container px-8 py-4 rounded-[16px] font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors shadow-sm"
+                className="bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-4 rounded-[16px] font-label-md text-label-md font-semibold uppercase tracking-wider transition-colors shadow-sm cursor-pointer"
               >
                 Create Eternal Memorial
               </button>

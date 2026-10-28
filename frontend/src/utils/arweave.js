@@ -87,8 +87,13 @@ function resolveMockUrl(txId) {
  */
 export function getArweaveUrl(txId) {
   if (!txId) return '';
-  if (isMockTxId(txId)) return resolveMockUrl(txId);
-  return `${ARWEAVE_GATEWAY}/${txId}`;
+  const clean = String(txId).trim();
+  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:')) {
+    return clean;
+  }
+  const normalizedId = clean.startsWith('ar://') ? clean.slice(5) : clean;
+  if (isMockTxId(normalizedId)) return resolveMockUrl(normalizedId);
+  return `${ARWEAVE_GATEWAY}/${normalizedId}`;
 }
 
 /**
@@ -549,6 +554,8 @@ export function buildNftMetadata({
     description: finalEpitaph,
     epitaph: cleanUserEpitaph || finalEpitaph,
     ...(cleanUserEpitaph ? { bio: cleanUserEpitaph } : {}),
+    ...(species ? { species } : {}),
+    ...(breed ? { breed } : {}),
     image: imageUrl,
     external_url: '',
     ...(resolvedBirthYear   ? { birth_year:   resolvedBirthYear   } : {}),
