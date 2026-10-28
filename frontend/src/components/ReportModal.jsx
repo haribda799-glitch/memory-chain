@@ -5,6 +5,7 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { formatTxError } from '../utils/txErrors';
+import { getActiveWalletChainId, setTxInProgress } from '../utils/mobileWallet';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 
 // Max time to wait for the report tx receipt before surfacing a "taking longer than expected" error.
@@ -29,7 +30,7 @@ export default function ReportModal({
 }) {
   const chainId = useChainId();
   const contractAddress = getContractAddress(chainId);
-  const { address: wagmiAddress, chain, connector } = useAccount();
+  const { address: wagmiAddress, chain, chainId: accountChainId, connector } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
   const { user, connectWallet } = usePrivy();
@@ -231,6 +232,7 @@ export default function ReportModal({
     // Synchronous lock: covers the window during await switchChainAsync before wagmi isPending flips.
     if (submittingRef.current) return;
     submittingRef.current = true;
+    setTxInProgress(true);
     setIsSubmitting(true);
 
     try {
@@ -268,7 +270,16 @@ export default function ReportModal({
         return;
       }
 
-      if (chain?.id !== baseSepolia.id) {
+      const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
+      const currentWalletChainId = await getActiveWalletChainId({
+        chain,
+        accountChainId,
+        wallet: activeWallet,
+        connector,
+        fallbackChainId: chainId,
+      });
+
+      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
         try {
           await switchChainAsync({ chainId: baseSepolia.id });
         } catch (switchErr) {
@@ -307,6 +318,7 @@ export default function ReportModal({
         setError(formatTxError(err, 'Report transaction failed. Please try again.'));
       }
     } finally {
+      setTxInProgress(false);
       submittingRef.current = false;
       setIsSubmitting(false);
     }

@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
-import { useSetActiveWallet } from '@privy-io/wagmi';
-import { useAccount, useDisconnect, useReconnect } from 'wagmi';
+import { useAccount, useDisconnect } from 'wagmi';
 import { baseSepolia } from 'viem/chains';
 import {
   isMobileWithoutEthereum,
   getMetaMaskDappDeepLink,
   syncReturningMobileWallet,
   closeStuckPrivyModalIfConnected,
+  isPrivyWaitingForWalletModalOpen,
+  isTxInProgress,
 } from '../utils/mobileWallet';
 
 export default function Header() {
@@ -29,9 +30,7 @@ export default function Header() {
     walletConnectors,
   } = usePrivy();
   const { wallets } = useWallets();
-  const { setActiveWallet } = useSetActiveWallet();
-  const { address: wagmiAddress } = useAccount();
-  const { reconnect } = useReconnect();
+  const { address: wagmiAddress, isConnected: isWagmiConnected } = useAccount();
   const { fundWallet } = useFundWallet();
   const { disconnect } = useDisconnect();
 
@@ -78,28 +77,36 @@ export default function Header() {
     }
   }, [authenticated, embeddedWallet, externalWallet, wagmiAddress, user, createWallet]);
 
-  // Keep Wagmi synced whenever Privy's useWallets() receives a newly connected external wallet
-  // and automatically dismiss any Privy modal stuck on "Waiting for MetaMask".
+  // Once an address is available, dismiss any Privy modal stuck on "Waiting for MetaMask"
+  // without sending any extra RPC requests to the wallet.
   useEffect(() => {
-    const active = externalWallet || embeddedWallet || wallets[0];
-    if (active && !wagmiAddress && typeof setActiveWallet === 'function') {
-      setActiveWallet(active).catch(() => {});
-    }
     if (displayAddress) {
       closeStuckPrivyModalIfConnected(true);
     }
-  }, [externalWallet, embeddedWallet, wallets, wagmiAddress, setActiveWallet, displayAddress]);
+  }, [displayAddress]);
 
-  // Recover WalletConnect / mobile MetaMask connection immediately when returning from MetaMask app to Chrome
+  // Recover WalletConnect / mobile MetaMask connection ONLY when returning to Chrome while
+  // the initial "Waiting for MetaMask" modal is open and no wallet address is connected yet.
   const handleVisibilityOrFocus = useCallback(() => {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (isTxInProgress()) return;
+
+    const alreadyConnected = Boolean(displayAddress) || Boolean(isWagmiConnected);
+    if (alreadyConnected) {
+      closeStuckPrivyModalIfConnected(true);
+      return;
+    }
+
+    if (!isPrivyWaitingForWalletModalOpen()) {
+      return;
+    }
+
     syncReturningMobileWallet({
       walletConnectors,
       wallets,
-      setActiveWallet,
-      reconnect,
+      hasConnectedAddress: alreadyConnected,
     });
-  }, [walletConnectors, wallets, setActiveWallet, reconnect]);
+  }, [walletConnectors, wallets, displayAddress, isWagmiConnected]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof document === 'undefined') return undefined;

@@ -16,7 +16,12 @@ import { useMemorials } from '../utils/useMemorials';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { useNow } from '../hooks/useNow';
-import { isMobileWithoutEthereum, getMetaMaskDappDeepLink } from '../utils/mobileWallet';
+import {
+  isMobileWithoutEthereum,
+  getMetaMaskDappDeepLink,
+  getActiveWalletChainId,
+  setTxInProgress,
+} from '../utils/mobileWallet';
 
 function SkeletonCard() {
   return (
@@ -46,7 +51,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
   const publicClient = usePublicClient();
   const { data: feeData } = useEstimateFeesPerGas();
 
-  const { address: wagmiAddress, connector, chain } = useAccount();
+  const { address: wagmiAddress, connector, chain, chainId: accountChainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
   const { user, ready, authenticated } = usePrivy();
@@ -93,18 +98,28 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
       return;
     }
 
-    if (chain?.id !== baseSepolia.id && switchChainAsync) {
-      try {
-        await switchChainAsync({ chainId: baseSepolia.id });
-      } catch (switchErr) {
-        console.error('Failed to switch network:', switchErr);
-        alert('Please switch to Base Sepolia in your wallet.');
-        return;
-      }
-    }
-
     setIsToggling(true);
+    setTxInProgress(true);
     try {
+      const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
+      const currentWalletChainId = await getActiveWalletChainId({
+        chain,
+        accountChainId,
+        wallet: activeWallet,
+        connector,
+        fallbackChainId: chainId,
+      });
+
+      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id && switchChainAsync) {
+        try {
+          await switchChainAsync({ chainId: baseSepolia.id });
+        } catch (switchErr) {
+          console.error('Failed to switch network:', switchErr);
+          alert('Please switch to Base Sepolia in your wallet.');
+          return;
+        }
+      }
+
       const gasConfig = {};
       if (feeData?.maxFeePerGas) {
         gasConfig.maxFeePerGas = (feeData.maxFeePerGas * 130n) / 100n;
@@ -160,6 +175,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
       const reason = err?.shortMessage || err?.metaMessages?.[0] || err?.message || 'Transaction failed';
       alert(`Failed to update visibility:\n${reason}`);
     } finally {
+      setTxInProgress(false);
       setIsToggling(false);
     }
   };

@@ -2,7 +2,6 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain, usePublicClient } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { useSetActiveWallet } from '@privy-io/wagmi';
 import { formatEther, decodeEventLog } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { CONTRACT_ABI } from '../config/contract';
@@ -11,7 +10,12 @@ import {
   uploadToArweave, uploadJsonToArweave, buildNftMetadata,
 } from '../utils/arweave';
 import { formatTxError, isUserRejection } from '../utils/txErrors';
-import { isMobileWithoutEthereum, getMetaMaskDappDeepLink } from '../utils/mobileWallet';
+import {
+  isMobileWithoutEthereum,
+  getMetaMaskDappDeepLink,
+  getActiveWalletChainId,
+  setTxInProgress,
+} from '../utils/mobileWallet';
 import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
@@ -531,7 +535,6 @@ async function preloadAiModels() {
 export default function CreateMemorial() {
   const { ready, authenticated, connectWallet, login, user } = usePrivy();
   const { wallets } = useWallets();
-  const { setActiveWallet } = useSetActiveWallet();
   const chainId = useChainId();
   const navigate = useNavigate();
   const contractAddress = getContractAddress(chainId);
@@ -540,20 +543,12 @@ export default function CreateMemorial() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   const externalWallet = wallets.find((w) => w.walletClientType !== 'privy');
-  const { address: wagmiAddress, connector, chain } = useAccount();
+  const { address: wagmiAddress, connector, chain, chainId: accountChainId } = useAccount();
   // Single source of truth for the signer: prefer the wagmi-connected account,
   // or any connected Privy wallet (external MetaMask via connectWallet() or embedded wallet).
   const activeUserAddress = wagmiAddress || externalWallet?.address || embeddedWallet?.address || wallets[0]?.address || user?.wallet?.address;
   const { data: balance } = useBalance({ address: activeUserAddress });
   const isConnected = Boolean(activeUserAddress) || (ready && authenticated);
-
-  // Sync Privy external/embedded wallet into wagmi when connected via connectWallet() without SIWE
-  useEffect(() => {
-    const preferred = externalWallet || embeddedWallet || wallets[0];
-    if (preferred && !wagmiAddress && setActiveWallet) {
-      setActiveWallet(preferred).catch(() => {});
-    }
-  }, [externalWallet, embeddedWallet, wallets, wagmiAddress, setActiveWallet]);
 
   // Form state
   const [step, setStep] = useState(0); // Wizard step 0-2
@@ -1246,30 +1241,28 @@ export default function CreateMemorial() {
   // Wallet / network readiness. Returns an English error message, or '' when ready to send.
   const ensureWalletReady = async () => {
     if (!isConnected || !activeUserAddress) return 'Please connect your wallet first';
-    if (!wagmiAddress && setActiveWallet) {
-      const preferred = externalWallet || embeddedWallet || wallets[0];
-      if (preferred) {
-        try {
-          await setActiveWallet(preferred);
-        } catch {
-          // continue and check connector/address below
-        }
-      }
-    }
     if (!connector && !activeUserAddress) {
       console.error('Wallet connector is missing or Privy was blocked.');
       return 'Wallet connection failed. Please disable your adblocker or reconnect your wallet.';
     }
     if (isCreationPaused) return 'Memorial creation is temporarily paused by the protocol. Please try again later.';
-    if (chain?.id !== baseSepolia.id) {
+
+    const preferredWallet = externalWallet || embeddedWallet || wallets[0];
+    const currentWalletChainId = await getActiveWalletChainId({
+      chain,
+      accountChainId,
+      wallet: preferredWallet,
+      connector,
+      fallbackChainId: chainId,
+    });
+
+    // Only call switchChain if the wallet is confirmed to be on a network other than Base Sepolia (84532)
+    if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
       try {
         if (switchChainAsync && connector) {
           await switchChainAsync({ chainId: baseSepolia.id });
-        } else {
-          const preferred = externalWallet || embeddedWallet || wallets[0];
-          if (preferred?.switchChain) {
-            await preferred.switchChain(baseSepolia.id);
-          }
+        } else if (preferredWallet?.switchChain) {
+          await preferredWallet.switchChain(baseSepolia.id);
         }
       } catch (switchErr) {
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
@@ -1299,6 +1292,7 @@ export default function CreateMemorial() {
     if (submitLockRef.current) return;
     if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
     submitLockRef.current = true;
+    setTxInProgress(true);
     setIsInitiating(true);
     setError('');
     setUnconfirmedTxHash(null);
@@ -1390,6 +1384,7 @@ export default function CreateMemorial() {
         setError(message);
       }
     } finally {
+      setTxInProgress(false);
       submitLockRef.current = false;
       setIsMinting(false);
       setIsInitiating(false);
@@ -1403,6 +1398,7 @@ export default function CreateMemorial() {
     if (submitLockRef.current) return;
     if (isInitiating || isMinting || isConfirming || Boolean(txHash) || flowStep > 0) return;
     submitLockRef.current = true;
+    setTxInProgress(true);
     setIsInitiating(true);
     setError('');
 
@@ -1485,6 +1481,7 @@ export default function CreateMemorial() {
         setError(message);
       }
     } finally {
+      setTxInProgress(false);
       submitLockRef.current = false;
       setIsMinting(false);
       setIsInitiating(false);

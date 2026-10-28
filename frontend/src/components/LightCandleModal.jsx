@@ -6,6 +6,7 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
 import { formatTxError, isUserRejection } from '../utils/txErrors';
+import { getActiveWalletChainId, setTxInProgress } from '../utils/mobileWallet';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 
 const CANDLE_TIERS = [
@@ -32,7 +33,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
   const chainId = useChainId();
   const contractAddress = getContractAddress(chainId);
   const publicClient = usePublicClient();
-  const { address: wagmiAddress, isConnected, chain, connector } = useAccount();
+  const { address: wagmiAddress, isConnected, chain, chainId: accountChainId, connector } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
   const { user, authenticated, ready } = usePrivy();
@@ -177,14 +178,23 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
   /** Make sure the connected wallet is on Base Sepolia before sending anything. */
   const ensureBaseSepolia = async () => {
-    if (chain?.id === baseSepolia.id) return true;
+    const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
+    const currentWalletChainId = await getActiveWalletChainId({
+      chain,
+      accountChainId,
+      wallet: activeWallet,
+      connector,
+      fallbackChainId: chainId,
+    });
+    // If already on Base Sepolia (84532), do NOT call switchChainAsync
+    if (currentWalletChainId === null || currentWalletChainId === baseSepolia.id) {
+      return true;
+    }
     try {
-      if (isConnected) {
+      if (isConnected && switchChainAsync) {
         await switchChainAsync({ chainId: baseSepolia.id });
-      } else if (embeddedWallet?.switchChain) {
-        await embeddedWallet.switchChain(baseSepolia.id);
-      } else if (wallets[0]?.switchChain) {
-        await wallets[0].switchChain(baseSepolia.id);
+      } else if (activeWallet?.switchChain) {
+        await activeWallet.switchChain(baseSepolia.id);
       }
       return true;
     } catch (switchErr) {
@@ -248,6 +258,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
     }
 
     submittingRef.current = true;
+    setTxInProgress(true);
     // Snapshot what is being paid for, so later UI changes cannot alter the optimistic update
     const isTierMode = mode === 'tier';
     const successPayload = isTierMode
@@ -331,6 +342,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       setError(formatTxError(err, 'Transaction rejected or failed.'));
       setTxPhase('idle');
     } finally {
+      setTxInProgress(false);
       submittingRef.current = false;
     }
   };
