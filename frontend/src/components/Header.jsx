@@ -254,24 +254,27 @@ export default function Header() {
                     type="button"
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      connectWallet();
+                      login({ loginMethods: ['email'] });
                     }}
                     disabled={!ready}
-                    className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
+                    title="Sign in with Email — automatic built-in wallet"
+                    className="bg-primary-container text-on-primary-container px-5 py-2 rounded-full font-label-md text-label-md uppercase tracking-wider hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    Connect Wallet
+                    <span className="material-symbols-outlined text-[16px]">mail</span>
+                    <span>Sign in with Email</span>
                   </button>
                   <button
                     type="button"
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      login({ loginMethods: ['email'] });
+                      connectWallet();
                     }}
                     disabled={!ready}
-                    title="Sign in with Email"
-                    className="border border-outline-variant/30 text-on-surface-variant px-3.5 py-2 rounded-full text-xs hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none"
+                    title="Connect an external Web3 wallet (MetaMask, WalletConnect)"
+                    className="border border-outline-variant/40 text-on-surface-variant px-3.5 py-2 rounded-full text-xs font-medium hover:bg-surface-tint hover:text-on-primary transition-colors disabled:opacity-50 outline-none focus:outline-none inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    Email
+                    <span className="material-symbols-outlined text-[15px]">account_balance_wallet</span>
+                    <span>Connect Wallet</span>
                   </button>
                 </div>
               )}
@@ -336,38 +339,41 @@ export default function Header() {
                     e.currentTarget.blur();
                     setMenuOpen(false);
                     burgerButtonRef.current?.blur();
-                    connectWallet();
+                    login({ loginMethods: ['email'] });
                   }}
                   disabled={!ready}
-                  className="text-left text-primary font-bold text-body-md disabled:opacity-50 flex items-center gap-2 outline-none focus:outline-none"
+                  className="w-full text-left bg-[#f5efe6] hover:bg-[#ebddd5] border border-[#d8c2ba]/70 rounded-2xl px-4 py-3 disabled:opacity-50 flex items-center gap-3 outline-none focus:outline-none transition-colors"
                 >
-                  <span className="material-symbols-outlined text-[18px]">account_balance_wallet</span>
-                  <span>Connect Wallet</span>
+                  <span className="material-symbols-outlined text-[20px] text-[#8a4f36]">mail</span>
+                  <div className="flex flex-col">
+                    <span className="text-primary font-bold text-body-md leading-tight">Sign in with Email</span>
+                    <span className="text-[11px] text-[#85736d] font-medium">Automatic built-in wallet</span>
+                  </div>
                 </button>
-                {showMobileMetaMaskDeepLink && (
-                  <a
-                    href={getMetaMaskDappDeepLink()}
-                    onClick={() => setMenuOpen(false)}
-                    className="text-left text-[#8a4f36] font-semibold text-sm flex items-center gap-2 hover:underline"
-                  >
-                    <span className="material-symbols-outlined text-[18px]">open_in_new</span>
-                    <span>Open in MetaMask App</span>
-                  </a>
-                )}
                 <button
                   type="button"
                   onClick={(e) => {
                     e.currentTarget.blur();
                     setMenuOpen(false);
                     burgerButtonRef.current?.blur();
-                    login({ loginMethods: ['email'] });
+                    connectWallet();
                   }}
                   disabled={!ready}
-                  className="text-left text-on-surface-variant text-sm disabled:opacity-50 flex items-center gap-2 outline-none focus:outline-none"
+                  className="text-left text-on-surface-variant text-sm font-medium disabled:opacity-50 flex items-center gap-2 px-2 py-1 outline-none focus:outline-none"
                 >
-                  <span className="material-symbols-outlined text-[18px]">mail</span>
-                  <span>Sign in with Email</span>
+                  <span className="material-symbols-outlined text-[18px]">account_balance_wallet</span>
+                  <span>Connect External Wallet</span>
                 </button>
+                {showMobileMetaMaskDeepLink && (
+                  <a
+                    href={getMetaMaskDappDeepLink()}
+                    onClick={() => setMenuOpen(false)}
+                    className="text-left text-[#8a4f36] font-medium text-xs flex items-center gap-2 px-2 hover:underline"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">open_in_new</span>
+                    <span>Open in MetaMask App</span>
+                  </a>
+                )}
               </div>
             )}
           </div>

@@ -36,7 +36,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
   const { address: wagmiAddress, isConnected, chain, chainId: accountChainId, connector } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
-  const { user, authenticated, ready } = usePrivy();
+  const { user, authenticated, ready, login, connectWallet } = usePrivy();
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   const activeAddress = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
 
@@ -548,34 +548,55 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
           )}
 
           {/* Submit Button */}
-          <button
-            type="button"
-            onClick={isConfirmed ? handleViewFlame : handleSubmit}
-            disabled={isSubmitDisabled}
-            className={`
-              w-full py-3.5 rounded-[14px] font-bold text-sm uppercase tracking-widest transition-all duration-200 cursor-pointer
-              ${isSubmitDisabled
-                ? 'bg-[#E9dfd3] text-[#8A7A6E] cursor-not-allowed'
-                : isConfirmed
-                  ? 'bg-green-100 text-green-700 hover:bg-green-200 hover:shadow-[0_4px_12px_rgba(22,163,74,0.2)] hover:scale-[1.01] active:scale-[0.99]'
-                  : 'bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] hover:scale-[1.01] active:scale-[0.99]'
-              }
-            `}
-          >
-            {isPreparing
-              ? 'Preparing...'
-              : isWriting || txPhase === 'wallet'
-              ? 'Confirming in Wallet...'
-              : isConfirming
-                ? 'Lighting Candle on-chain...'
-                : isConfirmed
-                  ? '🕯️ VIEW THE FLAME'
-                  : isCandlesPaused
-                    ? 'Candle Lighting Paused'
-                    : isPriceLoading
-                    ? 'Loading Price...'
-                    : !activeAddress
-                      ? 'Initializing Wallet...'
+          {!activeAddress ? (
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={() => login({ loginMethods: ['email'] })}
+                className="w-full py-3.5 rounded-[14px] font-bold text-xs uppercase tracking-widest transition-all duration-200 cursor-pointer bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">mail</span>
+                <span>Continue with Email</span>
+              </button>
+              <p className="text-[11px] text-[#8a4f36] text-center font-medium">
+                ✨ Creates your built-in wallet automatically via email
+              </p>
+              <button
+                type="button"
+                onClick={() => connectWallet()}
+                className="w-full py-2.5 rounded-[14px] font-semibold text-xs uppercase tracking-wider transition-all duration-200 cursor-pointer bg-white hover:bg-[#f5efe6] text-[#53433e] border border-[#d8c2ba] flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">account_balance_wallet</span>
+                <span>Connect External Wallet</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={isConfirmed ? handleViewFlame : handleSubmit}
+              disabled={isSubmitDisabled}
+              className={`
+                w-full py-3.5 rounded-[14px] font-bold text-sm uppercase tracking-widest transition-all duration-200 cursor-pointer
+                ${isSubmitDisabled
+                  ? 'bg-[#E9dfd3] text-[#8A7A6E] cursor-not-allowed'
+                  : isConfirmed
+                    ? 'bg-green-100 text-green-700 hover:bg-green-200 hover:shadow-[0_4px_12px_rgba(22,163,74,0.2)] hover:scale-[1.01] active:scale-[0.99]'
+                    : 'bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] hover:scale-[1.01] active:scale-[0.99]'
+                }
+              `}
+            >
+              {isPreparing
+                ? 'Preparing...'
+                : isWriting || txPhase === 'wallet'
+                ? 'Confirming in Wallet...'
+                : isConfirming
+                  ? 'Lighting Candle on-chain...'
+                  : isConfirmed
+                    ? '🕯️ VIEW THE FLAME'
+                    : isCandlesPaused
+                      ? 'Candle Lighting Paused'
+                      : isPriceLoading
+                      ? 'Loading Price...'
                       : isInsufficientFunds
                         ? 'Insufficient ETH Balance'
                         : mode === 'custom' && isBelowMin
@@ -585,7 +606,8 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
                             : mode === 'tier'
                               ? 'Light Candle'
                               : 'Send Tribute & Ignite'}
-          </button>
+            </button>
+          )}
         </div>
       </div>
 

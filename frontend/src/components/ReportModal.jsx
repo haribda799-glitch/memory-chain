@@ -33,7 +33,7 @@ export default function ReportModal({
   const { address: wagmiAddress, chain, chainId: accountChainId, connector } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { wallets } = useWallets();
-  const { user, connectWallet } = usePrivy();
+  const { user, login, connectWallet } = usePrivy();
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   // Single source of truth for the reporter address: prefer the wagmi account (the one that signs the tx),
   // fall back to Privy only when wagmi has none. Used for every read and for the localStorage key.
@@ -467,14 +467,27 @@ export default function ReportModal({
 
           {/* Action Button */}
           {!activeAddress ? (
-            <button
-              type="button"
-              onClick={() => connectWallet()}
-              className="w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md flex items-center justify-center gap-2"
-            >
-              <span className="material-symbols-outlined text-base">account_balance_wallet</span>
-              <span>Connect Wallet</span>
-            </button>
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={() => login({ loginMethods: ['email'] })}
+                className="w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">mail</span>
+                <span>Continue with Email</span>
+              </button>
+              <p className="text-[11px] text-[#8a4f36] text-center font-medium">
+                ✨ Creates your built-in wallet automatically via email
+              </p>
+              <button
+                type="button"
+                onClick={() => connectWallet()}
+                className="w-full py-2.5 rounded-xl font-semibold transition-all uppercase tracking-wider text-xs cursor-pointer bg-white hover:bg-[#f5efe6] text-[#53433e] border border-[#d8c2ba] flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">account_balance_wallet</span>
+                <span>Connect External Wallet</span>
+              </button>
+            </div>
           ) : isSuccess || alreadyReported ? (
             <button
               type="button"

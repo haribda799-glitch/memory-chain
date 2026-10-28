@@ -16,7 +16,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <PrivyProvider
       appId="cmriav2u300wd0cjnf2wy07xb"
       config={{
-        loginMethods: ['wallet', 'email'],
+        loginMethods: ['email', 'wallet'],
         // Putting baseSepolia first makes it Privy's defaultChain while keeping WalletConnect v2
         // namespaces optional (including mainnet/base) so Mobile MetaMask on Android/iOS never
         // rejects the pairing if the user has not pre-added Base Sepolia in MetaMask yet.
@@ -28,7 +28,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           landingHeader: 'Memory Chain',
           theme: 'light',
           walletChainType: 'ethereum-only',
-          showWalletLoginFirst: true,
+          showWalletLoginFirst: false,
           walletList: [
             'metamask',
             'wallet_connect',

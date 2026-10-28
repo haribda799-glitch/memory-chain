@@ -1629,35 +1629,56 @@ export default function CreateMemorial() {
     const showMetaMaskDeepLink = isMobileWithoutEthereum();
     return (
       <div className="pt-28 md:pt-32 pb-16 min-h-screen bg-[#fbf9f6] flex items-center justify-center px-6">
-        <div className="max-w-sm text-center space-y-5 animate-fadeIn">
-          <span className="material-symbols-outlined text-5xl text-[#d8c2ba]">account_balance_wallet</span>
-          <h2 className="text-2xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Connect Your Wallet</h2>
-          <p className="text-[#53433e] text-sm">Please connect your wallet to create a memorial.</p>
-          <div className="pt-2 flex flex-col items-center gap-2.5">
+        <div className="max-w-md w-full text-center p-8 bg-stone-50 border border-stone-200 rounded-[28px] shadow-sm space-y-6 animate-fadeIn">
+          <div className="w-16 h-16 rounded-full bg-[#ebddd5] flex items-center justify-center mx-auto text-[#8a4f36] shadow-sm">
+            <span className="material-symbols-outlined text-3xl">mail</span>
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-2xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+              Sign In to Continue
+            </h2>
+            <p className="text-[#53433e] text-sm leading-relaxed max-w-sm mx-auto">
+              Enter your email to automatically create and connect your personal blockchain wallet — no crypto apps or extensions needed.
+            </p>
+          </div>
+          <div className="pt-1 flex flex-col items-center gap-3">
+            <button
+              type="button"
+              onClick={() => login({ loginMethods: ['email'] })}
+              className="w-full inline-flex items-center justify-center gap-2 bg-[#8a4f36] hover:bg-[#723f2b] text-white px-7 py-3.5 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">mail</span>
+              <span>Continue with Email</span>
+            </button>
+            <p className="text-xs text-[#8a4f36] font-medium">
+              ✨ Creates your built-in wallet automatically via email
+            </p>
+
+            <div className="w-full flex items-center gap-3 py-2">
+              <div className="flex-1 h-px bg-[#d8c2ba]/60" />
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-[#85736d]">
+                Or for Web3 wallet users
+              </span>
+              <div className="flex-1 h-px bg-[#d8c2ba]/60" />
+            </div>
+
             <button
               type="button"
               onClick={() => connectWallet()}
-              className="w-full inline-flex items-center justify-center gap-2 bg-[#8a4f36] hover:bg-[#723f2b] text-white px-7 py-3.5 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl text-xs font-semibold uppercase tracking-wider text-[#53433e] bg-white hover:bg-[#f5efe6] border border-[#d8c2ba] transition-colors cursor-pointer"
             >
               <span className="material-symbols-outlined text-base">account_balance_wallet</span>
-              <span>Connect Wallet</span>
+              <span>Connect External Wallet</span>
             </button>
             {showMetaMaskDeepLink && (
               <a
                 href={getMetaMaskDappDeepLink()}
-                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl text-xs font-semibold uppercase tracking-wider text-[#8a4f36] bg-[#f5efe6] hover:bg-[#ebddd5] border border-[#d8c2ba]/70 transition-colors"
+                className="w-full inline-flex items-center justify-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-medium text-[#8a4f36] hover:bg-[#f5efe6] transition-colors"
               >
-                <span className="material-symbols-outlined text-base">open_in_new</span>
+                <span className="material-symbols-outlined text-sm">open_in_new</span>
                 <span>Open in MetaMask App</span>
               </a>
             )}
-            <button
-              type="button"
-              onClick={() => login({ loginMethods: ['email'] })}
-              className="text-xs font-medium text-[#85736d] hover:text-[#8a4f36] transition-colors cursor-pointer pt-1"
-            >
-              Or sign in with Email
-            </button>
           </div>
         </div>
       </div>
