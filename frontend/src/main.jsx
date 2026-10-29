@@ -26,7 +26,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         },
         appearance: {
           landingHeader: 'Memory Chain',
+          loginMessage: 'Enter your email to access your built-in memorial wallet',
           theme: 'light',
+          accentColor: '#C87D65',
           walletChainType: 'ethereum-only',
           showWalletLoginFirst: false,
           walletList: [

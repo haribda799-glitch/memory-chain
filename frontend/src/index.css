@@ -145,3 +145,22 @@
     transform: translateY(0);
   }
 }
+
+/* Privy Modal & Embedded Wallet Theme Overrides (Warm Memory Chain Palette) */
+:root {
+  --privy-color-background: #FDFBF7 !important;
+  --privy-color-background-2: #F5EFE6 !important;
+  --privy-color-background-3: #EBE2D5 !important;
+  --privy-color-foreground: #2C221E !important;
+  --privy-color-foreground-2: #6E5D53 !important;
+  --privy-color-foreground-3: #8C7A6B !important;
+  --privy-color-foreground-accent: #FFFFFF !important;
+  --privy-color-accent: #C87D65 !important;
+  --privy-color-accent-light: #DF9A84 !important;
+  --privy-color-accent-lightest: #F9EBE6 !important;
+  --privy-color-accent-dark: #A65D47 !important;
+  --privy-color-success: #B56B53 !important;
+  --privy-border-radius-sm: 10px !important;
+  --privy-border-radius-md: 14px !important;
+  --privy-border-radius-lg: 24px !important;
+}
