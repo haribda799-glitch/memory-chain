@@ -100,7 +100,12 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
   const isBelowMin = customWei < minCandlePriceWei;
   const remainderWei = minCandlePriceWei > 0n && !isBelowMin ? customWei % minCandlePriceWei : 0n;
   const hasRemainder = remainderWei > 0n && addedHours >= 1;
-  const remainderEthDisplay = formatEther(remainderWei);
+  const remainderEthDisplay =
+    remainderWei > 0n
+      ? Number(formatEther(remainderWei))
+          .toFixed(6)
+          .replace(/\.?0+$/, '') || '0'
+      : '0';
 
   const handleRoundToExactHours = () => {
     if (addedHours >= 1 && minCandlePriceWei > 0n) {
@@ -541,9 +546,15 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
           {/* Success State */}
           {isConfirmed && (
-            <div className="text-center bg-green-50 rounded-[10px] py-3 px-4 space-y-1">
-              <p className="text-green-700 text-sm font-semibold">✨ Candle lit successfully!</p>
-              <p className="text-green-600 text-xs">The flame now burns for {petName}.</p>
+            <div className="text-center bg-[#FDF8EE] border border-amber-400/40 text-amber-950 rounded-xl py-3 px-4 space-y-1">
+              <p className="text-amber-950 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+                <svg className="w-4 h-4 text-amber-600 shrink-0" viewBox="0 0 22 30" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M12.2 1.2C14.9 5.9 19.2 12.4 19.2 19.1C19.2 24.3 15.6 28.2 11 28.2C6.4 28.2 2.8 24.3 2.8 19.1C2.8 12.1 8.1 6.6 12.2 1.2Z" fill="#F59E0B" />
+                  <path d="M11.6 6.4C13.7 10.2 16.6 14.9 16.6 19.9C16.6 23.9 14.2 27.0 11 27.0C7.8 27.0 5.4 23.9 5.4 19.9C5.4 14.6 9.1 10.6 11.6 6.4Z" fill="#FBBF24" />
+                </svg>
+                <span>Candle lit successfully!</span>
+              </p>
+              <p className="text-amber-900/80 text-xs">The flame now burns for {petName}.</p>
             </div>
           )}
 
@@ -559,7 +570,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
                 <span>Continue with Email</span>
               </button>
               <p className="text-[11px] text-[#8a4f36] text-center font-medium">
-                ✨ Creates your built-in wallet automatically via email
+                Creates your built-in wallet automatically via email
               </p>
               <button
                 type="button"
@@ -576,36 +587,43 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
               onClick={isConfirmed ? handleViewFlame : handleSubmit}
               disabled={isSubmitDisabled}
               className={`
-                w-full py-3.5 rounded-[14px] font-bold text-sm uppercase tracking-widest transition-all duration-200 cursor-pointer
+                w-full py-3.5 rounded-[14px] font-bold text-sm uppercase tracking-widest transition-all duration-200 cursor-pointer inline-flex items-center justify-center gap-2
                 ${isSubmitDisabled
                   ? 'bg-[#E9dfd3] text-[#8A7A6E] cursor-not-allowed'
                   : isConfirmed
-                    ? 'bg-green-100 text-green-700 hover:bg-green-200 hover:shadow-[0_4px_12px_rgba(22,163,74,0.2)] hover:scale-[1.01] active:scale-[0.99]'
+                    ? 'bg-[#C87D65] hover:bg-[#B56B53] text-white hover:shadow-[0_4px_14px_rgba(200,125,101,0.35)] hover:scale-[1.01] active:scale-[0.99]'
                     : 'bg-gradient-to-r from-[#D48C6F] to-[#c07a5d] text-white hover:shadow-[0_4px_16px_rgba(212,140,111,0.4)] hover:scale-[1.01] active:scale-[0.99]'
                 }
               `}
             >
-              {isPreparing
-                ? 'Preparing...'
-                : isWriting || txPhase === 'wallet'
-                ? 'Confirming in Wallet...'
-                : isConfirming
-                  ? 'Lighting Candle on-chain...'
-                  : isConfirmed
-                    ? '🕯️ VIEW THE FLAME'
-                    : isCandlesPaused
-                      ? 'Candle Lighting Paused'
-                      : isPriceLoading
-                      ? 'Loading Price...'
-                      : isInsufficientFunds
-                        ? 'Insufficient ETH Balance'
-                        : mode === 'custom' && isBelowMin
-                          ? `Min. ${formatEther(minCandlePriceWei)} ETH Required`
-                          : isBurning
-                            ? 'Add Fuel & Time'
-                            : mode === 'tier'
-                              ? 'Light Candle'
-                              : 'Send Tribute & Ignite'}
+              {isPreparing ? (
+                'Preparing...'
+              ) : isWriting || txPhase === 'wallet' ? (
+                'Confirming in Wallet...'
+              ) : isConfirming ? (
+                'Lighting Candle on-chain...'
+              ) : isConfirmed ? (
+                <>
+                  <svg className="w-4 h-4 text-white shrink-0" viewBox="0 0 22 30" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M12.2 1.2C14.9 5.9 19.2 12.4 19.2 19.1C19.2 24.3 15.6 28.2 11 28.2C6.4 28.2 2.8 24.3 2.8 19.1C2.8 12.1 8.1 6.6 12.2 1.2Z" fill="currentColor" />
+                  </svg>
+                  <span>VIEW THE FLAME</span>
+                </>
+              ) : isCandlesPaused ? (
+                'Candle Lighting Paused'
+              ) : isPriceLoading ? (
+                'Loading Price...'
+              ) : isInsufficientFunds ? (
+                'Insufficient ETH Balance'
+              ) : mode === 'custom' && isBelowMin ? (
+                `Min. ${formatEther(minCandlePriceWei)} ETH Required`
+              ) : isBurning ? (
+                'Add Fuel & Time'
+              ) : mode === 'tier' ? (
+                'Light Candle'
+              ) : (
+                'Send Tribute & Ignite'
+              )}
             </button>
           )}
         </div>

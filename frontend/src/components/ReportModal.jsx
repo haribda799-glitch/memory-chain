@@ -362,7 +362,7 @@ export default function ReportModal({
             <span className="material-symbols-outlined text-[#5A5047] text-lg">close</span>
           </button>
 
-          <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-3 text-amber-700 shadow-sm">
+          <div className="w-14 h-14 rounded-full bg-[#C87D65]/12 text-[#A65D47] border border-[#C87D65]/20 flex items-center justify-center mx-auto mb-3 shadow-xs">
             <span className="material-symbols-outlined text-2xl">flag</span>
           </div>
 
@@ -378,7 +378,7 @@ export default function ReportModal({
           <div className="mb-2">
             {!activeAddress ? (
               <div className="p-5 text-sm text-[#53433e] bg-[#fbf5f2] border border-[#e0d0c7] rounded-2xl flex flex-col items-center text-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-700 shadow-sm">
+                <div className="w-12 h-12 rounded-full bg-[#C87D65]/12 border border-[#C87D65]/20 flex items-center justify-center text-[#A65D47] shadow-xs">
                   <span className="material-symbols-outlined text-2xl">account_balance_wallet</span>
                 </div>
                 <div className="space-y-1">
@@ -389,9 +389,9 @@ export default function ReportModal({
                 </div>
               </div>
             ) : isSuccess ? (
-              <div className="bg-green-50 border border-green-200 rounded-xl py-3 px-4 text-xs text-green-700 text-center space-y-1">
-                <p className="font-semibold">✨ Report Submitted</p>
-                <p className="text-green-600">Thank you for helping keep the gallery safe.</p>
+              <div className="bg-[#FDF8EE] border border-amber-400/40 rounded-xl py-3 px-4 text-xs text-amber-950 text-center space-y-1">
+                <p className="font-semibold">Report Submitted</p>
+                <p className="text-amber-900/80">Thank you for helping keep the gallery safe.</p>
               </div>
             ) : isBanned ? (
               <div className="p-3 mb-1 text-sm text-red-800 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3">
@@ -400,7 +400,7 @@ export default function ReportModal({
               </div>
             ) : showSybilNotice ? (
               <div className="p-3 mb-1 text-sm text-[#53433e] bg-[#f5f0eb] border border-[#e0d0c7] rounded-xl flex items-start gap-3">
-                <span className="material-symbols-outlined text-[#C16226] text-[20px] mt-0.5 flex-shrink-0">security</span>
+                <span className="material-symbols-outlined text-[#A65D47] text-[20px] mt-0.5 flex-shrink-0">security</span>
                 <div>
                   <strong className="block text-[#1b1c1a] font-medium mb-0.5">Sybil Guard Active</strong>
                   <span>You must own at least one memorial to submit a report.</span>
@@ -413,7 +413,7 @@ export default function ReportModal({
               </div>
             ) : alreadyReported ? (
               <div className="p-3 mb-1 text-sm text-[#53433e] bg-[#f5f0eb] border border-[#e0d0c7] rounded-xl flex items-center gap-3">
-                <span className="material-symbols-outlined text-green-600 text-[20px] flex-shrink-0">check_circle</span>
+                <span className="material-symbols-outlined text-[#8a4f36] text-[20px] flex-shrink-0">check_circle</span>
                 <span>You have already reported this memorial.</span>
               </div>
             ) : (
@@ -436,7 +436,7 @@ export default function ReportModal({
                     key={reason}
                     className={`flex items-center gap-3 p-3 rounded-xl border text-xs cursor-pointer transition-all ${
                       isSelected
-                        ? 'border-[#C16226] bg-[#fbf5f2] font-semibold text-[#2C2520] shadow-sm'
+                        ? 'border-[#C87D65]/60 bg-[#FAF6F0] font-semibold text-[#2C2520] shadow-xs'
                         : 'border-[#E9dfd3] bg-[#fdfcfa] text-[#5A5047] hover:bg-[#F5efe6]'
                     }`}
                   >
@@ -446,8 +446,16 @@ export default function ReportModal({
                       value={reason}
                       checked={isSelected}
                       onChange={() => setSelectedReason(reason)}
-                      className="w-4 h-4 text-[#C16226] border-[#d8c2ba] focus:ring-[#C16226] accent-[#C16226]"
+                      className="sr-only"
                     />
+                    <span
+                      className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
+                        isSelected ? 'border-[#C87D65] bg-white' : 'border-[#d8c2ba] bg-white'
+                      }`}
+                      aria-hidden="true"
+                    >
+                      {isSelected && <span className="w-2 h-2 rounded-full bg-[#C87D65]" />}
+                    </span>
                     <span>{reason}</span>
                   </label>
                 );
@@ -471,13 +479,13 @@ export default function ReportModal({
               <button
                 type="button"
                 onClick={() => login({ loginMethods: ['email'] })}
-                className="w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md flex items-center justify-center gap-2"
+                className="w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer bg-[#B56B53] hover:bg-[#9E5943] text-white hover:shadow-md flex items-center justify-center gap-2"
               >
                 <span className="material-symbols-outlined text-base">mail</span>
                 <span>Continue with Email</span>
               </button>
               <p className="text-[11px] text-[#8a4f36] text-center font-medium">
-                ✨ Creates your built-in wallet automatically via email
+                Creates your built-in wallet automatically via email
               </p>
               <button
                 type="button"
@@ -504,7 +512,7 @@ export default function ReportModal({
               className={`w-full py-3.5 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer ${
                 isDisabled
                   ? 'bg-[#e8e2dc] text-[#a09080] cursor-not-allowed opacity-80'
-                  : 'bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md'
+                  : 'bg-[#B56B53] hover:bg-[#9E5943] text-white hover:shadow-md'
               }`}
             >
               {isPending || isSubmitting

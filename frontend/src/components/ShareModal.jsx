@@ -222,7 +222,7 @@ export default function ShareModal({
             <span className="material-symbols-outlined text-lg">close</span>
           </button>
 
-          <div className="w-14 h-14 rounded-full bg-amber-100/80 flex items-center justify-center mx-auto mb-3 text-amber-800 shadow-sm border border-amber-200/50">
+          <div className="w-14 h-14 rounded-full bg-[#C87D65]/12 flex items-center justify-center mx-auto mb-3 text-[#C87D65] shadow-xs border border-[#C87D65]/20">
             <span className="material-symbols-outlined text-2xl">qr_code_2</span>
           </div>
 
@@ -278,7 +278,7 @@ export default function ShareModal({
             onClick={handleDownloadQR}
             className="w-full py-2.5 px-4 rounded-xl border border-[#d8c2ba] bg-[#fbf5f2] hover:bg-[#f3ebe4] text-[#53433e] hover:text-[#2C2520] font-semibold text-xs tracking-wider uppercase transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-xs active:scale-[0.99]"
           >
-            <span className="material-symbols-outlined text-base text-[#C16226]">download</span>
+            <span className="material-symbols-outlined text-base text-[#C87D65]">download</span>
             <span>Download QR Code (PNG)</span>
           </button>
 
@@ -294,15 +294,15 @@ export default function ShareModal({
                 readOnly
                 value={memorialUrl}
                 onFocus={(e) => e.target.select()}
-                className="flex-1 min-w-0 px-3 py-2 text-xs text-[#2C2520] bg-[#f5f0eb] border border-[#e0d0c7] rounded-xl focus:outline-none focus:border-[#C16226] select-all truncate font-mono"
+                className="flex-1 min-w-0 px-3 py-2 text-xs text-[#2C2520] bg-[#f5f0eb] border border-[#e0d0c7] rounded-xl focus:outline-none focus:border-[#C87D65] select-all truncate font-mono"
               />
               <button
                 type="button"
                 onClick={handleCopy}
                 className={`px-4 py-2 rounded-xl font-bold transition-all uppercase tracking-wider text-xs cursor-pointer flex items-center gap-1.5 whitespace-nowrap shadow-xs active:scale-[0.98] ${
                   copied
-                    ? 'bg-emerald-700 text-white'
-                    : 'bg-gradient-to-r from-[#C16226] to-[#A8551F] text-white hover:shadow-md'
+                    ? 'bg-[#8a4f36] text-white'
+                    : 'bg-[#C87D65] hover:bg-[#B56B53] text-white hover:shadow-md'
                 }`}
               >
                 <span className="material-symbols-outlined text-sm">
