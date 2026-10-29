@@ -146,6 +146,42 @@
   }
 }
 
+@keyframes mcFlameBreathe {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+    opacity: 0.94;
+  }
+  50% {
+    transform: translate3d(0, -0.6px, 0) scale3d(1.05, 1.08, 1);
+    opacity: 1;
+  }
+}
+
+@keyframes mcHaloBreathe {
+  0%, 100% {
+    transform: scale3d(0.96, 0.96, 1);
+    opacity: 0.18;
+  }
+  50% {
+    transform: scale3d(1.08, 1.08, 1);
+    opacity: 0.28;
+  }
+}
+
+.mc-logo-flame {
+  transform-box: fill-box;
+  transform-origin: 50% 90%;
+  animation: mcFlameBreathe 3.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.mc-logo-halo {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  animation: mcHaloBreathe 3.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
 /* Privy Modal & Embedded Wallet Theme Overrides (Warm Memory Chain Palette) */
 :root {
   --privy-color-background: #FDFBF7 !important;

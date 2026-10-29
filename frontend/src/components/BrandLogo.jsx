@@ -1,104 +1,118 @@
 import { useId } from 'react';
 import { Link } from 'react-router-dom';
 
-export default function BrandLogo({ className = '', showSubtitle = true }) {
-  const gradId = useId();
-  const archGradId = `mc-arch-${gradId}`;
-  const flameGradId = `mc-flame-${gradId}`;
+export default function BrandLogo({ className = '' }) {
+  const uid = useId();
+  const archGradId = `mc-arch-frame-${uid}`;
+  const archFillId = `mc-arch-fill-${uid}`;
+  const flameGradId = `mc-flame-outer-${uid}`;
 
   return (
     <Link
       to="/"
-      className={`group inline-flex items-center gap-2.5 no-underline cursor-pointer select-none ${className}`}
-      aria-label="Memory Chain — Eternal Sanctuary"
+      className={`group inline-flex items-center gap-3 no-underline cursor-pointer select-none ${className}`}
+      aria-label="Memory Chain"
     >
-      {/* Medallion Emblem */}
-      <span className="w-9 h-9 rounded-full bg-[#F5EFE6] border border-[#E5D7C3] flex items-center justify-center shrink-0 shadow-2xs transition-all duration-300 group-hover:border-[#D4A359]/70 group-hover:bg-[#FAF5EC] group-hover:shadow-[0_0_14px_rgba(212,163,89,0.22)]">
+      {/* Sacred Memorial Arch with Living Golden Flame */}
+      <span className="relative inline-flex items-center justify-center w-8 h-9 md:w-9 md:h-10 shrink-0 transition-transform duration-300 group-hover:scale-[1.04]">
         <svg
-          width="22"
-          height="22"
-          viewBox="0 0 24 24"
+          viewBox="0 0 36 40"
           fill="none"
           xmlns="http://www.w3.org/2000/svg"
           aria-hidden="true"
-          className="overflow-visible"
+          className="w-full h-full overflow-visible"
         >
           <defs>
-            <linearGradient id={archGradId} x1="4" y1="2" x2="20" y2="22" gradientUnits="userSpaceOnUse">
+            {/* Golden-Terracotta Arch Border Gradient (#D4A359 -> #B56B53) */}
+            <linearGradient id={archGradId} x1="4" y1="2" x2="32" y2="38" gradientUnits="userSpaceOnUse">
               <stop offset="0%" stopColor="#D4A359" />
-              <stop offset="55%" stopColor="#C87D65" />
-              <stop offset="100%" stopColor="#A65D47" />
+              <stop offset="52%" stopColor="#C87D65" />
+              <stop offset="100%" stopColor="#B56B53" />
             </linearGradient>
-            <linearGradient id={flameGradId} x1="12" y1="6.5" x2="12" y2="16.5" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stopColor="#F3C66F" />
-              <stop offset="55%" stopColor="#DF8B57" />
-              <stop offset="100%" stopColor="#C87D65" />
+
+            {/* Warm Illuminated Sanctuary Interior (#FDF8EE with radial golden glow) */}
+            <radialGradient id={archFillId} cx="18" cy="21" r="14" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#FEF3C7" />
+              <stop offset="52%" stopColor="#FDF6E2" />
+              <stop offset="100%" stopColor="#FDF8EE" />
+            </radialGradient>
+
+            {/* Living Flame Outer Petal Gradient (#FBBF24 -> #EA580C) */}
+            <linearGradient id={flameGradId} x1="18" y1="10" x2="18" y2="28" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#FBBF24" />
+              <stop offset="55%" stopColor="#F59E0B" />
+              <stop offset="100%" stopColor="#EA580C" />
             </linearGradient>
           </defs>
 
-          {/* Memorial Arch Outline */}
+          {/* Outer Sacred Arch Silhouette (Vaulted Top + Softly Rounded Base) */}
           <path
-            d="M5.5 19.2V10.5C5.5 6.91 8.41 4 12 4C15.59 4 18.5 6.91 18.5 10.5V19.2"
+            d="M3.5 17.5C3.5 9.492 9.992 3 18 3C26.008 3 32.5 9.492 32.5 17.5V33.2C32.5 35.3 30.8 37 28.7 37H7.3C5.2 37 3.5 35.3 3.5 33.2V17.5Z"
+            fill={`url(#${archFillId})`}
             stroke={`url(#${archGradId})`}
-            strokeWidth="1.5"
-            strokeLinecap="round"
+            strokeWidth="1.8"
           />
 
-          {/* Subtle Inner Sanctuary Halo */}
+          {/* Noble Inner Double-Frame Arch Line */}
           <path
-            d="M7.6 17.5V10.7C7.6 8.16 9.57 6.1 12 6.1C14.43 6.1 16.4 8.16 16.4 10.7V17.5"
+            d="M6.6 17.6C6.6 11.3 11.7 6.2 18 6.2C24.3 6.2 29.4 11.3 29.4 17.6V32.4C29.4 33.45 28.55 34.3 27.5 34.3H8.5C7.45 34.3 6.6 33.45 6.6 32.4V17.6Z"
             stroke={`url(#${archGradId})`}
-            strokeWidth="0.75"
-            strokeOpacity="0.38"
-            strokeLinecap="round"
+            strokeWidth="0.85"
+            strokeOpacity="0.48"
           />
 
-          {/* Minimalist Candle Flame (glows gently on hover) */}
-          <g className="origin-[12px_15px] transition-all duration-300 group-hover:scale-110 group-hover:drop-shadow-[0_0_5px_rgba(212,163,89,0.65)]">
+          {/* Soft Golden Halo Around the Flame */}
+          <circle
+            cx="18"
+            cy="20.2"
+            r="8.4"
+            fill="#F59E0B"
+            opacity="0.22"
+            className="mc-logo-halo"
+          />
+
+          {/* Multi-Layered Living Golden Flame */}
+          <g className="mc-logo-flame">
+            {/* Outer Flame Petal (#FBBF24 -> #EA580C) */}
             <path
-              d="M12 7.4C13.2 9.4 14.8 11.4 14.8 13.5C14.8 15.15 13.55 16.4 12 16.4C10.45 16.4 9.2 15.15 9.2 13.5C9.2 11.4 10.8 9.4 12 7.4Z"
+              d="M18 9.8C20.1 13.3 23.8 17.2 23.8 21.7C23.8 25.25 21.2 28 18 28C14.8 28 12.2 25.25 12.2 21.7C12.2 17.2 15.9 13.3 18 9.8Z"
               fill={`url(#${flameGradId})`}
             />
+            {/* Warm Golden Mid-Layer */}
             <path
-              d="M12 11.1C12.55 12.05 13.2 12.95 13.2 13.9C13.2 14.65 12.68 15.2 12 15.2C11.32 15.2 10.8 14.65 10.8 13.9C10.8 12.95 11.45 12.05 12 11.1Z"
-              fill="#FFF6E0"
+              d="M18 13.2C19.45 15.7 21.9 18.5 21.9 21.9C21.9 24.35 20.15 26.3 18 26.3C15.85 26.3 14.1 24.35 14.1 21.9C14.1 18.5 16.55 15.7 18 13.2Z"
+              fill="#FBBF24"
+              opacity="0.88"
+            />
+            {/* Bright Inner Heart of the Flame (#FEF3C7) */}
+            <path
+              d="M18 16.7C18.9 18.35 20.2 20.2 20.2 22.3C20.2 23.8 19.22 25 18 25C16.78 25 15.8 23.8 15.8 22.3C15.8 20.2 17.1 18.35 18 16.7Z"
+              fill="#FEF3C7"
             />
           </g>
 
-          {/* Eternity Link / Base Arc */}
+          {/* Subtle Golden Altar Cradle Under the Flame */}
           <path
-            d="M4.5 19.3C7.2 20.6 9.6 21 12 21C14.4 21 16.8 20.6 19.5 19.3"
+            d="M12.6 30.4C14.3 31.35 16.1 31.8 18 31.8C19.9 31.8 21.7 31.35 23.4 30.4"
             stroke={`url(#${archGradId})`}
-            strokeWidth="1.35"
+            strokeWidth="1.25"
             strokeLinecap="round"
-          />
-          <path
-            d="M9.4 19.2C10.2 18.2 11.05 17.8 12 17.8C12.95 17.8 13.8 18.2 14.6 19.2"
-            stroke={`url(#${archGradId})`}
-            strokeWidth="1.15"
-            strokeLinecap="round"
+            strokeOpacity="0.7"
           />
         </svg>
       </span>
 
-      {/* Two-Tone Typography + Micro-Subtitle */}
-      <span className="flex flex-col justify-center">
-        <span
-          className="text-[21px] md:text-[22px] leading-tight tracking-tight"
-          style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
-        >
-          <span className="font-medium text-[#2C221E] transition-colors duration-300 group-hover:text-[#1b1411]">
-            Memory
-          </span>{' '}
-          <span className="italic font-normal text-[#B56B53] transition-colors duration-300 group-hover:text-[#9E5943]">
-            Chain
-          </span>
+      {/* Vertically Centered Two-Tone Brand Title */}
+      <span
+        className="inline-flex items-baseline gap-1.5 text-[22px] md:text-[25px] leading-none tracking-tight"
+        style={{ fontFamily: "'Libre Caslon Text', Georgia, serif" }}
+      >
+        <span className="font-medium text-[#2C221E] transition-colors duration-300 group-hover:text-[#1b1411]">
+          Memory
         </span>
-        {showSubtitle && (
-          <span className="text-[9px] uppercase tracking-[0.22em] text-stone-400 font-sans block -mt-0.5">
-            Eternal Sanctuary
-          </span>
-        )}
+        <span className="italic font-normal text-[#B56B53] transition-colors duration-300 group-hover:text-[#9E5943]">
+          Chain
+        </span>
       </span>
     </Link>
   );
