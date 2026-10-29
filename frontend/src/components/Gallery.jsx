@@ -194,27 +194,31 @@ export default function Gallery() {
   return (
     <>
       {/* Hero Section */}
-      <section className="relative w-full min-h-[80vh] flex items-center bg-surface-container-low px-margin-mobile md:px-margin-desktop overflow-hidden">
-        <div className="absolute inset-0 z-0">
+      {/* Mobile (< md): vertical composition (clean photo on top, cream panel with text below). Desktop (md+): unchanged side overlay. */}
+      <section className="relative w-full min-h-[80vh] flex items-center bg-surface-container-low px-margin-mobile md:px-margin-desktop overflow-hidden max-md:min-h-0 max-md:items-start max-md:pt-[250px] max-md:bg-[#FAF6F0]">
+        <div className="absolute inset-0 z-0 max-md:bottom-auto max-md:h-[340px]">
           <img
             alt="Hero background"
-            className="w-full h-full object-cover object-center md:object-[62%_center] opacity-95"
+            className="w-full h-full object-cover object-center md:object-[62%_center] opacity-95 max-md:object-[48%_25%] max-md:opacity-100"
             src="https://lh3.googleusercontent.com/aida-public/AB6AXuDu5JCtYBQCGHxS5qbJCGOcTajrmvY_TBDdGeeEONM6t7A2e7Co2fBYROf8rqlRuRBZOgGJHLOQYnwaqJhdJyicxxv_bWDSDp5NBZN_dCxjVw3FETh7zEqKtVabByMFexHpU_4JLG1SDV48ugDHNzaREVwVxpZK3gFiM594mZbD_QCAoRU4-5MoIFmMb7NB6ZWuG40qCqSVnTCvEkEyHNpAId4jLjrLXDfS65tenaRaX1ObCg_b_gC5spbXOOoelVF_H6oHcxil0q8"
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-[#FAF6F0]/95 via-[#FAF6F0]/75 via-35% to-transparent to-52%" />
+          {/* Desktop side gradient (md+ only) */}
+          <div className="absolute inset-0 bg-gradient-to-r from-[#FAF6F0]/95 via-[#FAF6F0]/75 via-35% to-transparent to-52% max-md:hidden" />
+          {/* Mobile bottom-to-top cream gradient: top of the photo stays clean, bottom blends into the text panel */}
+          <div className="absolute inset-0 bg-gradient-to-t from-[#FAF6F0] via-[#FAF6F0]/95 via-[22%] to-transparent to-[55%] md:hidden" />
         </div>
         <div className="relative z-10 max-w-container-max mx-auto w-full">
-          <div className="flex flex-col justify-center space-y-stack-md py-20 md:max-w-[380px] lg:max-w-[400px]">
-            <h1 className="font-display-lg-mobile md:font-display-lg text-display-lg-mobile md:text-display-lg text-on-surface">
+          <div className="flex flex-col justify-center space-y-stack-md py-20 md:max-w-[380px] lg:max-w-[400px] max-md:pt-0 max-md:pb-14 max-md:space-y-4">
+            <h1 className="font-display-lg-mobile md:font-display-lg text-display-lg-mobile md:text-display-lg text-on-surface max-md:text-[32px] max-md:leading-[1.12]">
               Eternal memory for your beloved friend.
             </h1>
-            <p className="font-body-lg text-body-lg text-on-surface-variant max-w-[330px]">
+            <p className="font-body-lg text-body-lg text-on-surface-variant max-w-[330px] max-md:max-w-none max-md:text-[16px] max-md:leading-[1.6]">
               Preserved on-chain forever. A sanctuary of peace, ensuring their legacy outlasts time itself.
             </p>
-            <div className="pt-4">
+            <div className="pt-4 max-md:pt-2">
               <button
                 onClick={() => navigate('/create')}
-                className="bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-4 rounded-[16px] font-label-md text-label-md font-semibold uppercase tracking-wider transition-colors shadow-sm cursor-pointer"
+                className="bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-4 rounded-[16px] font-label-md text-label-md font-semibold uppercase tracking-wider transition-colors shadow-sm cursor-pointer max-md:w-full max-md:min-h-[56px] max-md:text-[13px] max-md:tracking-[0.12em] max-md:shadow-[0_8px_20px_-6px_rgba(194,115,87,0.55)] max-md:active:scale-[0.98] max-md:active:bg-[#8a4f36]"
               >
                 Create Eternal Memorial
               </button>
