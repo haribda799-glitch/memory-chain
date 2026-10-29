@@ -1567,17 +1567,17 @@ export default function CreateMemorial() {
                 <button
                   type="button"
                   onClick={() => navigate(memorialTargetUrl)}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
+                  className="w-full sm:w-auto whitespace-nowrap text-xs md:text-sm px-5 py-3.5 gap-2 inline-flex items-center justify-center bg-[#8a4f36] text-white rounded-2xl font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-base">visibility</span>
+                  <span className="material-symbols-outlined text-base shrink-0">visibility</span>
                   <span>View Memorial</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => navigate('/')}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 border border-[#d8c2ba] text-[#53433e] hover:bg-[#f5efe6] px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer"
+                  className="w-full sm:w-auto whitespace-nowrap text-xs md:text-sm px-5 py-3.5 gap-2 inline-flex items-center justify-center border border-[#d8c2ba] text-[#53433e] hover:bg-[#f5efe6] rounded-2xl font-semibold uppercase tracking-wider transition-colors cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-base">explore</span>
+                  <span className="material-symbols-outlined text-base shrink-0">explore</span>
                   <span>Browse Gallery</span>
                 </button>
               </>
@@ -1586,18 +1586,18 @@ export default function CreateMemorial() {
                 <button
                   type="button"
                   onClick={() => navigate(memorialTargetUrl)}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
+                  className="w-full sm:w-auto whitespace-nowrap text-xs md:text-sm px-5 py-3.5 gap-2 inline-flex items-center justify-center bg-[#8a4f36] text-white rounded-2xl font-semibold uppercase tracking-wider hover:opacity-90 transition-opacity shadow-sm cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-base">arrow_forward</span>
+                  <span className="material-symbols-outlined text-base shrink-0">arrow_forward</span>
                   <span>Open Memorial</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowShareModal(true)}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 border border-[#d8c2ba] bg-[#fbf5f2] text-[#8a4f36] hover:bg-[#f3ebe4] hover:text-[#2C2520] px-7 py-3.5 rounded-2xl text-xs font-semibold uppercase tracking-wider transition-colors shadow-xs cursor-pointer"
+                  className="w-full sm:w-auto whitespace-nowrap text-xs md:text-sm px-5 py-3.5 gap-2 inline-flex items-center justify-center border border-[#d8c2ba] bg-[#fbf5f2] text-[#8a4f36] hover:bg-[#f3ebe4] hover:text-[#2C2520] rounded-2xl font-semibold uppercase tracking-wider transition-colors shadow-xs cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-base">qr_code_2</span>
-                  <span>Share / Get QR Code</span>
+                  <span className="material-symbols-outlined text-base shrink-0">qr_code_2</span>
+                  <span>Share &amp; QR Code</span>
                 </button>
               </>
             )}
@@ -2026,29 +2026,85 @@ export default function CreateMemorial() {
         {/* ── WIZARD STEP 1: Story ── */}
         {step === 1 && (
           <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-8">
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div>
                 <label className={labelBase}>Birth Date</label>
-                <input className={inputBase} type="date" min={`${MIN_YEAR}-01-01`} max={todayISO} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
+                <input
+                  className={inputBase}
+                  type="date"
+                  min={`${MIN_YEAR}-01-01`}
+                  max={todayISO}
+                  value={birthDate}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setBirthDate(val);
+                    if (val && /^\d{4}/.test(val)) {
+                      setBirthYear(val.slice(0, 4));
+                    } else if (!val) {
+                      setBirthYear('');
+                    }
+                  }}
+                />
               </div>
               <div>
                 <label className={labelBase}>Memorial Date</label>
-                <input className={inputBase} type="date" min={`${MIN_YEAR}-01-01`} max={todayISO} value={memorialDate} onChange={(e) => setMemorialDate(e.target.value)} />
+                <input
+                  className={inputBase}
+                  type="date"
+                  min={`${MIN_YEAR}-01-01`}
+                  max={todayISO}
+                  value={memorialDate}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setMemorialDate(val);
+                    if (val && /^\d{4}/.test(val)) {
+                      setPassingYear(val.slice(0, 4));
+                    } else if (!val) {
+                      setPassingYear('');
+                    }
+                  }}
+                />
               </div>
-              <div>
-                <label className={labelBase}>Birth Year (if exact date unknown)</label>
-                <input className={inputBase} type="number" min={MIN_YEAR} max={currentYear} step={1} placeholder="e.g. 2012" value={birthYear} onChange={(e) => setBirthYear(e.target.value)} />
+              <div className={birthDate ? 'opacity-40 pointer-events-none select-none transition-opacity' : 'transition-opacity'}>
+                <label className={labelBase}>
+                  {birthDate ? 'Birth Year (synced from date)' : 'Birth Year (if exact date unknown)'}
+                </label>
+                <input
+                  className={inputBase}
+                  type="number"
+                  min={MIN_YEAR}
+                  max={currentYear}
+                  step={1}
+                  placeholder="e.g. 2012"
+                  value={birthDate ? birthDate.slice(0, 4) : birthYear}
+                  readOnly={Boolean(birthDate)}
+                  tabIndex={birthDate ? -1 : 0}
+                  onChange={(e) => setBirthYear(e.target.value)}
+                />
               </div>
-              <div>
-                <label className={labelBase}>Passing Year (if exact date unknown)</label>
-                <input className={inputBase} type="number" min={MIN_YEAR} max={currentYear} step={1} placeholder="e.g. 2024" value={passingYear} onChange={(e) => setPassingYear(e.target.value)} />
+              <div className={memorialDate ? 'opacity-40 pointer-events-none select-none transition-opacity' : 'transition-opacity'}>
+                <label className={labelBase}>
+                  {memorialDate ? 'Passing Year (synced from date)' : 'Passing Year (if exact date unknown)'}
+                </label>
+                <input
+                  className={inputBase}
+                  type="number"
+                  min={MIN_YEAR}
+                  max={currentYear}
+                  step={1}
+                  placeholder="e.g. 2024"
+                  value={memorialDate ? memorialDate.slice(0, 4) : passingYear}
+                  readOnly={Boolean(memorialDate)}
+                  tabIndex={memorialDate ? -1 : 0}
+                  onChange={(e) => setPassingYear(e.target.value)}
+                />
               </div>
             </div>
             <div>
               <label className={labelBase} htmlFor="bio">A Brief Memory</label>
               <textarea
                 id="bio" rows={5}
-                className="w-full bg-[#fbf9f6] border border-[#d8c2ba]/40 rounded-xl p-4 text-base text-[#1b1c1a] placeholder-[#85736d] focus:border-[#8a4f36] focus:ring-1 focus:ring-[#8a4f36] outline-none transition-all resize-none"
+                className="w-full border border-stone-200/90 bg-[#FAF7F2]/50 focus:bg-white focus:border-[#C87D65] focus:ring-2 focus:ring-[#C87D65]/15 rounded-2xl p-4 text-base text-[#1b1c1a] placeholder-[#85736d] outline-none transition-all resize-none"
                 placeholder="Tell us about their favourite toy, habit, or memory…"
                 value={description} onChange={(e) => setDescription(e.target.value.slice(0, 500))}
               />
@@ -2060,26 +2116,75 @@ export default function CreateMemorial() {
         {/* ── WIZARD STEP 2: Preservation (review + mint) ── */}
         {step === 2 && (
           <div className="space-y-6">
-            <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-4">
-              <h3 className="text-xl text-[#1b1c1a] mb-2" style={{ fontFamily: "'Libre Caslon Text', serif" }}>Review your Memorial</h3>
-              {previewUrl && (
-                <div className="relative w-full h-48 rounded-xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
-                  <img
-                    src={previewUrl}
-                    alt={photo?.name || 'Pet Portrait'}
-                    className="w-full h-full object-cover"
-                  />
+            <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-6 md:p-8 space-y-5">
+              <h3 className="text-xl text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                Review your Memorial
+              </h3>
+
+              <div className="flex flex-col md:flex-row items-center md:items-center gap-6 md:gap-8 pt-1">
+                {/* Left (or Top on mobile): Vertical 4:5 Memorial Arch Preview */}
+                <div className="w-36 h-44 md:w-40 md:h-48 rounded-t-full rounded-b-2xl overflow-hidden border-2 border-amber-500/30 shadow-md shrink-0 bg-[#f5f3f0] flex items-center justify-center">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt={photo?.name || 'Pet Portrait'}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center text-[#85736d] p-4 text-center">
+                      <span className="material-symbols-outlined text-3xl text-[#d8c2ba] mb-1">pets</span>
+                      <span className="text-[11px]">No photo selected</span>
+                    </div>
+                  )}
                 </div>
-              )}
-              <div className="space-y-2 text-sm text-[#53433e]">
-                <p><span className="font-semibold text-[#1b1c1a]">Name:</span> {petName || '—'}</p>
-                {species && <p><span className="font-semibold text-[#1b1c1a]">Species:</span> {species}{breed ? ` · ${breed}` : ''}</p>}
-                {(birthDate || memorialDate) && (
-                  <p><span className="font-semibold text-[#1b1c1a]">Dates:</span> {birthDate || '?'} – {memorialDate || '?'}</p>
-                )}
-                {description && <p className="italic leading-relaxed">"{description}"</p>}
-                <p><span className="font-semibold text-[#1b1c1a]">Visibility:</span> {isPublic ? 'Public Gallery' : 'Unlisted (Private)'}</p>
-                <p><span className="font-semibold text-[#1b1c1a]">Creation Fee:</span> {isFeeKnown ? `${creationFeeLabel} ETH` : 'Loading fee…'}</p>
+
+                {/* Right: Refined Memorial Typography */}
+                <div className="flex-1 w-full text-center md:text-left space-y-3">
+                  <div>
+                    <h4
+                      className="font-serif text-2xl text-[#1b1c1a] leading-tight"
+                      style={{ fontFamily: "'Libre Caslon Text', serif" }}
+                    >
+                      {petName || 'Unnamed Companion'}
+                    </h4>
+                    {(species || breed || birthDate || memorialDate || birthYear || passingYear) && (
+                      <p className="text-xs uppercase tracking-widest text-[#8a4f36] font-semibold mt-1.5">
+                        {[
+                          [species, breed].filter(Boolean).join(' · '),
+                          (birthDate || birthYear || memorialDate || passingYear)
+                            ? `${birthDate || birthYear || '?'} – ${memorialDate || passingYear || '?'}`
+                            : '',
+                        ]
+                          .filter(Boolean)
+                          .join('  •  ')}
+                      </p>
+                    )}
+                  </div>
+
+                  {description ? (
+                    <div className="bg-[#FAF7F2] border border-stone-200/80 rounded-xl px-4 py-3 text-sm text-[#53433e] italic leading-relaxed">
+                      &ldquo;{description}&rdquo;
+                    </div>
+                  ) : (
+                    <p className="text-xs text-[#85736d] italic">
+                      No custom epitaph entered — a gentle default tribute will be inscribed.
+                    </p>
+                  )}
+
+                  <div className="pt-2 border-t border-stone-200/70 flex flex-wrap items-center justify-center md:justify-start gap-x-5 gap-y-1.5 text-xs text-[#53433e]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-semibold text-[#1b1c1a]">Visibility:</span>
+                      <span>{isPublic ? 'Public Gallery' : 'Unlisted (Private)'}</span>
+                    </span>
+                    <span className="text-stone-300 hidden sm:inline">•</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-semibold text-[#1b1c1a]">Creation Fee:</span>
+                      <span className="font-semibold text-[#8a4f36]">
+                        {isFeeKnown ? `${creationFeeLabel} ETH` : 'Loading fee…'}
+                      </span>
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -2128,43 +2233,30 @@ export default function CreateMemorial() {
                 Note: data on Arweave is permanent — hiding removes the card from the site catalog but does not encrypt it on the blockchain.
               </p>
             </div>
-
-            <form onSubmit={handleSubmit}>
-              <button
-                type="submit"
-                disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused || !isFeeKnown}
-                className="w-full flex items-center justify-center gap-3 bg-[#d48c6f] text-white py-4 rounded-2xl text-sm font-semibold tracking-wider uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isSubmitting ? (
-                  <>
-                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>{isConfirming || txHash ? 'Confirming on-chain…' : 'Minting…'}</span>
-                  </>
-                ) : isCreationPaused ? (
-                  <><span>Memorial Creation Paused</span></>
-                ) : !isFeeKnown ? (
-                  <><span>Loading fee…</span></>
-                ) : isInsufficientFunds ? (
-                  <><span>Insufficient ETH Balance ({creationFeeLabel} ETH + gas required)</span></>
-                ) : (
-                  <><span>Preserve Forever ({creationFeeLabel} ETH)</span><span className="material-symbols-outlined text-base">arrow_forward</span></>
-                )}
-              </button>
-            </form>
           </div>
         )}
 
         {/* ── Navigation ── */}
-        {!isSubmitting && (
-          <div className="flex justify-between items-center pt-6 border-t border-[#d8c2ba]/30 mt-6">
-            <button
-              type="button"
-              onClick={() => step > 0 ? setStep(s => s - 1) : navigate(-1)}
-              className="px-6 py-3 border border-[#665d56] text-[#665d56] rounded-2xl text-xs font-semibold tracking-widest uppercase hover:bg-[#efeeeb] transition-colors"
-            >
-              Back
-            </button>
-            {step < 2 && (
+        {!isSubmitting ? (
+          <div
+            className={`flex pt-6 border-t border-[#d8c2ba]/30 mt-6 ${
+              step === 0
+                ? 'items-center justify-end'
+                : step === 1
+                  ? 'items-center justify-between gap-4'
+                  : 'flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3'
+            }`}
+          >
+            {step > 0 && (
+              <button
+                type="button"
+                onClick={() => setStep((s) => s - 1)}
+                className="px-6 py-3.5 border border-stone-300 text-stone-600 hover:bg-stone-100 rounded-2xl text-xs font-semibold tracking-widest uppercase transition-colors cursor-pointer text-center"
+              >
+                Back
+              </button>
+            )}
+            {step < 2 ? (
               <button
                 type="button"
                 onClick={() => {
@@ -2186,13 +2278,47 @@ export default function CreateMemorial() {
                   setStep(s => s + 1);
                 }}
                 disabled={step === 0 && detectedPerson && !humanConsentGiven}
-                className="flex items-center gap-2 bg-[#d48c6f] text-white px-8 py-3 rounded-2xl text-xs font-semibold tracking-widest uppercase hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                className="flex items-center justify-center gap-2 bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-3.5 rounded-2xl text-xs font-semibold tracking-widest uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs"
               >
                 <span>Continue</span>
                 <span className="material-symbols-outlined text-base">arrow_forward</span>
               </button>
+            ) : (
+              <form onSubmit={handleSubmit} className="flex-1 sm:max-w-sm">
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused || !isFeeKnown}
+                  className="w-full flex items-center justify-center gap-2.5 bg-[#c27357] hover:bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs sm:text-sm font-semibold tracking-wider uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  {isCreationPaused ? (
+                    <span>Memorial Creation Paused</span>
+                  ) : !isFeeKnown ? (
+                    <span>Loading fee…</span>
+                  ) : isInsufficientFunds ? (
+                    <span>Insufficient ETH ({creationFeeLabel} ETH + gas)</span>
+                  ) : (
+                    <>
+                      <span>Preserve Forever ({creationFeeLabel} ETH)</span>
+                      <span className="material-symbols-outlined text-base">arrow_forward</span>
+                    </>
+                  )}
+                </button>
+              </form>
             )}
           </div>
+        ) : (
+          step === 2 && (
+            <div className="pt-6 border-t border-[#d8c2ba]/30 mt-6">
+              <button
+                type="button"
+                disabled
+                className="w-full flex items-center justify-center gap-3 bg-[#c27357] text-white py-4 rounded-2xl text-sm font-semibold tracking-wider uppercase opacity-60 cursor-not-allowed"
+              >
+                <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>{isConfirming || txHash ? 'Confirming on-chain…' : 'Minting…'}</span>
+              </button>
+            </div>
+          )
         )}
 
         {/* Full-screen blocking modal while transaction is submitted to Base Sepolia and waiting for confirmation */}
