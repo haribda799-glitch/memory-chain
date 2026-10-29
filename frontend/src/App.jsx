@@ -1,5 +1,6 @@
 import { HashRouter, Routes, Route } from 'react-router-dom';
 import Header from './components/Header';
+import BrandLogo from './components/BrandLogo';
 import Gallery from './components/Gallery';
 import CreateMemorial from './components/CreateMemorial';
 import MemorialPage from './components/MemorialPage';
@@ -26,9 +27,9 @@ export default function App() {
         {/* Footer */}
         <footer className="bg-surface-container-low border-t border-outline-variant/15 w-full py-12">
           <div className="flex flex-col md:flex-row justify-between items-center px-margin-mobile md:px-margin-desktop space-y-stack-md md:space-y-0 max-w-container-max mx-auto">
-            <div className="font-headline-sm text-headline-sm text-primary flex flex-col items-center md:items-start">
-              Memory Chain
-              <span className="font-body-sm text-body-sm text-on-surface-variant mt-2 block">
+            <div className="flex flex-col items-center md:items-start">
+              <BrandLogo />
+              <span className="font-body-sm text-body-sm text-on-surface-variant mt-2.5 block">
                 © {new Date().getFullYear()} Memory Chain. Preserving eternal bonds on-chain.
               </span>
             </div>

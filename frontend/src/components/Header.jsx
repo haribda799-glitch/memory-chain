@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Link, NavLink } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
+import BrandLogo from './BrandLogo';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
 import { useAccount, useDisconnect } from 'wagmi';
 import { baseSepolia } from 'viem/chains';
@@ -164,12 +165,7 @@ export default function Header() {
         <div className="flex justify-between items-center px-margin-mobile md:px-margin-desktop py-4 max-w-container-max mx-auto">
           
           {/* Logo */}
-          <Link
-            to="/"
-            className="font-headline-sm text-headline-sm text-primary cursor-pointer hover:opacity-80 transition-opacity animate-[fadeIn_1.5s_ease-in-out]"
-          >
-            Memory Chain
-          </Link>
+          <BrandLogo className="animate-[fadeIn_1.5s_ease-in-out]" />
 
           {/* Desktop Nav */}
           <div className="hidden md:flex items-center space-x-8 font-body-md text-body-md">

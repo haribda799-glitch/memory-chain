@@ -198,23 +198,17 @@ export default function Gallery() {
         <div className="absolute inset-0 z-0">
           <img
             alt="Hero background"
-            className="w-full h-full object-cover object-[65%_center] opacity-95"
+            className="w-full h-full object-cover object-center md:object-[62%_center] opacity-95"
             src="https://lh3.googleusercontent.com/aida-public/AB6AXuDu5JCtYBQCGHxS5qbJCGOcTajrmvY_TBDdGeeEONM6t7A2e7Co2fBYROf8rqlRuRBZOgGJHLOQYnwaqJhdJyicxxv_bWDSDp5NBZN_dCxjVw3FETh7zEqKtVabByMFexHpU_4JLG1SDV48ugDHNzaREVwVxpZK3gFiM594mZbD_QCAoRU4-5MoIFmMb7NB6ZWuG40qCqSVnTCvEkEyHNpAId4jLjrLXDfS65tenaRaX1ObCg_b_gC5spbXOOoelVF_H6oHcxil0q8"
           />
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                'linear-gradient(90deg, rgba(245, 243, 240, 0.92) 0%, rgba(245, 243, 240, 0.68) 24%, rgba(245, 243, 240, 0.22) 42%, rgba(245, 243, 240, 0) 58%)',
-            }}
-          />
+          <div className="absolute inset-0 bg-gradient-to-r from-[#FAF6F0]/95 via-[#FAF6F0]/75 via-35% to-transparent to-52%" />
         </div>
-        <div className="relative z-10 max-w-container-max mx-auto w-full grid grid-cols-1 md:grid-cols-2 gap-gutter">
-          <div className="flex flex-col justify-center space-y-stack-md py-20">
+        <div className="relative z-10 max-w-container-max mx-auto w-full">
+          <div className="flex flex-col justify-center space-y-stack-md py-20 md:max-w-[380px] lg:max-w-[400px]">
             <h1 className="font-display-lg-mobile md:font-display-lg text-display-lg-mobile md:text-display-lg text-on-surface">
               Eternal memory for your beloved friend.
             </h1>
-            <p className="font-body-lg text-body-lg text-on-surface-variant max-w-lg">
+            <p className="font-body-lg text-body-lg text-on-surface-variant max-w-[330px]">
               Preserved on-chain forever. A sanctuary of peace, ensuring their legacy outlasts time itself.
             </p>
             <div className="pt-4">
