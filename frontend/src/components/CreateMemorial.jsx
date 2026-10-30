@@ -15,6 +15,8 @@ import {
   getMetaMaskDappDeepLink,
   getActiveWalletChainId,
   setTxInProgress,
+  resolveActivePrivyWallet,
+  sendContractWithPrivyFallback,
 } from '../utils/mobileWallet';
 import ShareModal from './ShareModal';
 
@@ -1255,13 +1257,13 @@ export default function CreateMemorial() {
   // Wallet / network readiness. Returns an English error message, or '' when ready to send.
   const ensureWalletReady = async () => {
     if (!isConnected || !activeUserAddress) return 'Please connect your wallet first';
-    if (!connector && !activeUserAddress) {
+    const preferredWallet = resolveActivePrivyWallet(wallets, activeUserAddress) || externalWallet || embeddedWallet || wallets[0];
+    if (!connector && !preferredWallet && !activeUserAddress) {
       console.error('Wallet connector is missing or Privy was blocked.');
       return 'Wallet connection failed. Please disable your adblocker or reconnect your wallet.';
     }
     if (isCreationPaused) return 'Memorial creation is temporarily paused by the protocol. Please try again later.';
 
-    const preferredWallet = externalWallet || embeddedWallet || wallets[0];
     const currentWalletChainId = await getActiveWalletChainId({
       chain,
       accountChainId,
@@ -1273,7 +1275,11 @@ export default function CreateMemorial() {
     // Only call switchChain if the wallet is confirmed to be on a network other than Base Sepolia (84532)
     if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
       try {
-        if (switchChainAsync && connector) {
+        if (preferredWallet?.walletClientType === 'privy' || !connector) {
+          if (preferredWallet?.switchChain) {
+            await preferredWallet.switchChain(baseSepolia.id);
+          }
+        } else if (switchChainAsync && connector) {
           await switchChainAsync({ chainId: baseSepolia.id });
         } else if (preferredWallet?.switchChain) {
           await preferredWallet.switchChain(baseSepolia.id);
@@ -1287,16 +1293,21 @@ export default function CreateMemorial() {
   };
 
   // The tx account prefers the wagmi-connected address and falls back to activeUserAddress.
-  const sendCreateMemorialTx = ({ name, metadataTxId, isPublicFlag, fee }) => writeContractAsync({
-    address: contractAddress,
-    abi: CONTRACT_ABI,
-    functionName: 'create_memorial',
-    args: [name, metadataTxId, isPublicFlag],
-    value: fee,
-    account: wagmiAddress || activeUserAddress,
-    ...(connector ? { connector } : {}),
-    chainId: baseSepolia.id,
-  });
+  const sendCreateMemorialTx = ({ name, metadataTxId, isPublicFlag, fee }) =>
+    sendContractWithPrivyFallback({
+      writeContractAsync,
+      connector,
+      wallets,
+      activeAddress: wagmiAddress || activeUserAddress,
+      txParams: {
+        address: contractAddress,
+        abi: CONTRACT_ABI,
+        functionName: 'create_memorial',
+        args: [name, metadataTxId, isPublicFlag],
+        value: fee,
+        chainId: baseSepolia.id,
+      },
+    });
 
   const FEE_UNAVAILABLE_MESSAGE = 'Could not load the current creation fee from the contract. Please check your connection and try again.';
 

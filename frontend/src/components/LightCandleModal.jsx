@@ -6,7 +6,12 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress, getExplorerUrl } from '../config/chains';
 import { formatTxError, isUserRejection } from '../utils/txErrors';
-import { getActiveWalletChainId, setTxInProgress } from '../utils/mobileWallet';
+import {
+  getActiveWalletChainId,
+  setTxInProgress,
+  resolveActivePrivyWallet,
+  sendContractWithPrivyFallback,
+} from '../utils/mobileWallet';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 
 const CANDLE_TIERS = [
@@ -183,7 +188,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
 
   /** Make sure the connected wallet is on Base Sepolia before sending anything. */
   const ensureBaseSepolia = async () => {
-    const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
+    const activeWallet = resolveActivePrivyWallet(wallets, activeAddress);
     const currentWalletChainId = await getActiveWalletChainId({
       chain,
       accountChainId,
@@ -196,7 +201,11 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       return true;
     }
     try {
-      if (isConnected && switchChainAsync) {
+      if (activeWallet?.walletClientType === 'privy' || !isConnected || !connector) {
+        if (activeWallet?.switchChain) {
+          await activeWallet.switchChain(baseSepolia.id);
+        }
+      } else if (isConnected && connector && switchChainAsync) {
         await switchChainAsync({ chainId: baseSepolia.id });
       } else if (activeWallet?.switchChain) {
         await activeWallet.switchChain(baseSepolia.id);
@@ -320,12 +329,14 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
         console.warn('[Candle] Skipping simulateContract: publicClient or wallet address missing');
       }
 
-      console.log('[Candle] Sending transaction via writeContractAsync...');
+      console.log('[Candle] Sending transaction...');
       setTxPhase('wallet');
-      const hash = await writeContractAsync({
-        ...txArgs,
-        account: activeAddress,
-        ...(connector ? { connector } : {}),
+      const hash = await sendContractWithPrivyFallback({
+        writeContractAsync,
+        connector,
+        wallets,
+        activeAddress,
+        txParams: txArgs,
       });
 
       console.log('[Candle] Tx submitted! Hash:', hash);

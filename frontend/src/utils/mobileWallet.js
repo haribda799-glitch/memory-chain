@@ -2,6 +2,9 @@
 // Mobile Wallet, Chain Check & MetaMask Deep-Link Helpers
 // ============================================================
 
+import { createWalletClient, custom } from 'viem';
+import { baseSepolia } from 'viem/chains';
+
 const SYNC_COOLDOWN_MS = 3000; // Strict 3-second cooldown between returning-wallet sync checks
 let lastSyncTimestamp = 0;
 let syncInFlight = false;
@@ -245,4 +248,91 @@ export async function syncReturningMobileWallet({
   }
 
   return foundAddress;
+}
+
+/**
+ * Resolves the active Privy wallet from `useWallets()` matching `activeAddress`,
+ * or falls back to the embedded wallet (`walletClientType === 'privy'`) or the first available wallet.
+ */
+export function resolveActivePrivyWallet(wallets, activeAddress) {
+  if (!Array.isArray(wallets) || wallets.length === 0) return null;
+  if (activeAddress) {
+    const addrLower = String(activeAddress).toLowerCase();
+    const matched = wallets.find((w) => w?.address && String(w.address).toLowerCase() === addrLower);
+    if (matched) return matched;
+  }
+  return (
+    wallets.find((w) => w?.walletClientType === 'privy') ||
+    wallets.find((w) => w?.walletClientType !== 'privy') ||
+    wallets[0] ||
+    null
+  );
+}
+
+/**
+ * Sends a smart contract write transaction reliably across both Privy Embedded Wallets (email login)
+ * and external wallets (MetaMask / WalletConnect), even immediately after a page reload (F5) when
+ * wagmi's internal connector may still be disconnected while `useWallets()` already holds the wallet.
+ */
+export async function sendContractWithPrivyFallback({
+  writeContractAsync,
+  connector,
+  wallets,
+  activeAddress,
+  txParams,
+}) {
+  const privyWallet = resolveActivePrivyWallet(wallets, activeAddress);
+  const isPrivyEmbedded = privyWallet?.walletClientType === 'privy';
+  const canUseDirectProvider = Boolean(
+    privyWallet?.address && typeof privyWallet.getEthereumProvider === 'function'
+  );
+
+  const executeViaPrivyProvider = async (wallet) => {
+    const walletChainId = parseNumericChainId(wallet.chainId);
+    if (walletChainId !== null && walletChainId !== baseSepolia.id && typeof wallet.switchChain === 'function') {
+      await wallet.switchChain(baseSepolia.id);
+    }
+    const provider = await wallet.getEthereumProvider();
+    const walletClient = createWalletClient({
+      account: wallet.address,
+      chain: baseSepolia,
+      transport: custom(provider),
+    });
+    return await walletClient.writeContract({
+      address: txParams.address,
+      abi: txParams.abi,
+      functionName: txParams.functionName,
+      args: txParams.args,
+      ...(txParams.value !== undefined ? { value: txParams.value } : {}),
+      ...(txParams.maxFeePerGas !== undefined ? { maxFeePerGas: txParams.maxFeePerGas } : {}),
+      ...(txParams.maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas: txParams.maxPriorityFeePerGas } : {}),
+      chain: baseSepolia,
+      account: wallet.address,
+    });
+  };
+
+  // Primary path for Privy Embedded Wallet (or when wagmi's connector is not yet attached after F5)
+  if (canUseDirectProvider && (isPrivyEmbedded || !connector)) {
+    return await executeViaPrivyProvider(privyWallet);
+  }
+
+  try {
+    return await writeContractAsync({
+      ...txParams,
+      account: activeAddress,
+      ...(connector ? { connector } : {}),
+      chainId: baseSepolia.id,
+    });
+  } catch (err) {
+    const errText = `${err?.name || ''} ${err?.shortMessage || ''} ${err?.message || ''}`;
+    const isConnectorNotConnected =
+      err?.name === 'ConnectorNotConnectedError' ||
+      /connector not connected|not connected|no account|account not found/i.test(errText);
+
+    if (isConnectorNotConnected && canUseDirectProvider) {
+      console.warn('[WalletTx] wagmi connector not connected after reload, falling back to direct Privy EIP-1193 provider.');
+      return await executeViaPrivyProvider(privyWallet);
+    }
+    throw err;
+  }
 }

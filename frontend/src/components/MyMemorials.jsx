@@ -21,6 +21,8 @@ import {
   getMetaMaskDappDeepLink,
   getActiveWalletChainId,
   setTxInProgress,
+  resolveActivePrivyWallet,
+  sendContractWithPrivyFallback,
 } from '../utils/mobileWallet';
 
 function SkeletonCard() {
@@ -101,7 +103,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
     setIsToggling(true);
     setTxInProgress(true);
     try {
-      const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
+      const activeWallet = resolveActivePrivyWallet(wallets, activeAddress) || embeddedWallet || wallets[0];
       const currentWalletChainId = await getActiveWalletChainId({
         chain,
         accountChainId,
@@ -110,9 +112,17 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
         fallbackChainId: chainId,
       });
 
-      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id && switchChainAsync) {
+      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
         try {
-          await switchChainAsync({ chainId: baseSepolia.id });
+          if (activeWallet?.walletClientType === 'privy' || !connector) {
+            if (activeWallet?.switchChain) {
+              await activeWallet.switchChain(baseSepolia.id);
+            }
+          } else if (switchChainAsync && connector) {
+            await switchChainAsync({ chainId: baseSepolia.id });
+          } else if (activeWallet?.switchChain) {
+            await activeWallet.switchChain(baseSepolia.id);
+          }
         } catch (switchErr) {
           console.error('Failed to switch network:', switchErr);
           alert('Please switch to Base Sepolia in your wallet.');
@@ -129,14 +139,19 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
       }
 
       console.log(`[toggle_public] Calling toggle_public for memorial #${mem.tokenId}, current isPublic=${localIsPublic}...`);
-      const hash = await writeContractAsync({
-        address: contractAddress,
-        abi: CONTRACT_ABI,
-        functionName: 'toggle_public',
-        args: [BigInt(mem.tokenId)],
-        account: activeAddress,
-        ...(connector ? { connector } : {}),
-        ...gasConfig,
+      const hash = await sendContractWithPrivyFallback({
+        writeContractAsync,
+        connector,
+        wallets,
+        activeAddress,
+        txParams: {
+          address: contractAddress,
+          abi: CONTRACT_ABI,
+          functionName: 'toggle_public',
+          args: [BigInt(mem.tokenId)],
+          chainId: baseSepolia.id,
+          ...gasConfig,
+        },
       });
 
       console.log(`[toggle_public] Tx submitted: ${hash}. Awaiting receipt...`);

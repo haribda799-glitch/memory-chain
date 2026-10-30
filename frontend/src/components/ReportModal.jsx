@@ -5,7 +5,12 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { formatTxError } from '../utils/txErrors';
-import { getActiveWalletChainId, setTxInProgress } from '../utils/mobileWallet';
+import {
+  getActiveWalletChainId,
+  setTxInProgress,
+  resolveActivePrivyWallet,
+  sendContractWithPrivyFallback,
+} from '../utils/mobileWallet';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 
 // Max time to wait for the report tx receipt before surfacing a "taking longer than expected" error.
@@ -43,6 +48,7 @@ export default function ReportModal({
   const [error, setError] = useState('');
   const [isClosing, setIsClosing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submittedTxHash, setSubmittedTxHash] = useState(null);
   const submittingRef = useRef(false);
 
   const { data: feeData } = useEstimateFeesPerGas({ chainId: baseSepolia.id });
@@ -157,7 +163,8 @@ export default function ReportModal({
     }
   }, [activeAddress, memorialId, epoch, reportWeight]);
 
-  const { writeContractAsync, data: txHash, isPending, reset: resetWrite } = useWriteContract();
+  const { writeContractAsync, data: writeTxHash, isPending, reset: resetWrite } = useWriteContract();
+  const txHash = submittedTxHash || writeTxHash;
   const {
     isLoading: isConfirming,
     isSuccess,
@@ -208,6 +215,7 @@ export default function ReportModal({
   }, [isPending, isConfirming]);
   useEffect(() => {
     if (!isOpen || isTxInFlightRef.current || submittingRef.current) return;
+    setSubmittedTxHash(null);
     resetWriteRef.current?.();
   }, [isOpen]);
 
@@ -264,13 +272,13 @@ export default function ReportModal({
         return;
       }
 
-      if (!connector) {
+      const activeWallet = resolveActivePrivyWallet(wallets, activeAddress) || embeddedWallet || wallets[0];
+      if (!connector && !activeWallet) {
         console.error('Wallet connector is missing or Privy was blocked.');
         setError('Wallet connection failed. Please disable your adblocker or reconnect your wallet.');
         return;
       }
 
-      const activeWallet = wallets.find((w) => w.walletClientType !== 'privy') || embeddedWallet || wallets[0];
       const currentWalletChainId = await getActiveWalletChainId({
         chain,
         accountChainId,
@@ -281,7 +289,15 @@ export default function ReportModal({
 
       if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
         try {
-          await switchChainAsync({ chainId: baseSepolia.id });
+          if (activeWallet?.walletClientType === 'privy' || !connector) {
+            if (activeWallet?.switchChain) {
+              await activeWallet.switchChain(baseSepolia.id);
+            }
+          } else if (switchChainAsync && connector) {
+            await switchChainAsync({ chainId: baseSepolia.id });
+          } else if (activeWallet?.switchChain) {
+            await activeWallet.switchChain(baseSepolia.id);
+          }
         } catch (switchErr) {
           console.error('[Report] Switch chain error:', switchErr);
           setError(formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia and try again.'));
@@ -290,6 +306,7 @@ export default function ReportModal({
       }
 
       // Clear a previous failed attempt (e.g. receipt timeout / revert) before sending a new tx.
+      setSubmittedTxHash(null);
       resetWriteRef.current?.();
 
       try {
@@ -301,17 +318,22 @@ export default function ReportModal({
           gasConfig.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * 130n) / 100n;
         }
 
-        const hash = await writeContractAsync({
-          address: contractAddress,
-          abi: CONTRACT_ABI,
-          functionName: 'report_memorial',
-          args: [BigInt(memorialId || 0)],
-          account: activeAddress,
+        const hash = await sendContractWithPrivyFallback({
+          writeContractAsync,
           connector,
-          chainId: baseSepolia.id,
-          ...gasConfig,
+          wallets,
+          activeAddress,
+          txParams: {
+            address: contractAddress,
+            abi: CONTRACT_ABI,
+            functionName: 'report_memorial',
+            args: [BigInt(memorialId || 0)],
+            chainId: baseSepolia.id,
+            ...gasConfig,
+          },
         });
 
+        setSubmittedTxHash(hash);
         console.log('[Report] Submitted tx hash:', hash);
       } catch (err) {
         console.error('[Report] Transaction failed:', err);

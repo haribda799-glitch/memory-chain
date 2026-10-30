@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink } from 'react-router-dom';
 import BrandLogo from './BrandLogo';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
+import { useSetActiveWallet } from '@privy-io/wagmi';
 import { useAccount, useDisconnect } from 'wagmi';
 import { baseSepolia } from 'viem/chains';
 import {
@@ -31,9 +32,11 @@ export default function Header() {
     walletConnectors,
   } = usePrivy();
   const { wallets } = useWallets();
-  const { address: wagmiAddress, isConnected: isWagmiConnected } = useAccount();
+  const { address: wagmiAddress, isConnected: isWagmiConnected, connector } = useAccount();
+  const { setActiveWallet } = useSetActiveWallet();
   const { fundWallet } = useFundWallet();
   const { disconnect } = useDisconnect();
+  const lastSyncedWalletRef = useRef('');
 
   // Combined logout: clear external wallet sessions, Wagmi connector cache, and Privy session
   const handleLogout = async (closeFn) => {
@@ -77,6 +80,49 @@ export default function Header() {
       createWallet();
     }
   }, [authenticated, embeddedWallet, externalWallet, wagmiAddress, user, createWallet]);
+
+  // Automatically synchronize Privy wallet (especially Email embedded wallet) with wagmi after F5 reload
+  useEffect(() => {
+    if (!ready || !wallets || wallets.length === 0) {
+      lastSyncedWalletRef.current = '';
+      return;
+    }
+    if (isTxInProgress()) return;
+
+    const targetWallet =
+      (authenticated && embeddedWallet) ||
+      embeddedWallet ||
+      externalWallet ||
+      wallets[0];
+
+    if (!targetWallet?.address) return;
+
+    const needsWagmiSync = !isWagmiConnected || !connector || !wagmiAddress;
+    if (!needsWagmiSync) {
+      lastSyncedWalletRef.current = '';
+      return;
+    }
+
+    if (typeof setActiveWallet === 'function') {
+      const syncKey = `${targetWallet.walletClientType}:${targetWallet.address.toLowerCase()}`;
+      if (lastSyncedWalletRef.current !== syncKey) {
+        lastSyncedWalletRef.current = syncKey;
+        Promise.resolve(setActiveWallet(targetWallet)).catch((err) => {
+          console.warn('[Header] setActiveWallet sync note:', err?.message || err);
+        });
+      }
+    }
+  }, [
+    ready,
+    authenticated,
+    wallets,
+    embeddedWallet,
+    externalWallet,
+    isWagmiConnected,
+    connector,
+    wagmiAddress,
+    setActiveWallet,
+  ]);
 
   // Once an address is available, dismiss any Privy modal stuck on "Waiting for MetaMask"
   // without sending any extra RPC requests to the wallet.
