@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import BrandLogo from './BrandLogo';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
 import { useSetActiveWallet } from '@privy-io/wagmi';
@@ -18,6 +18,9 @@ export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const burgerButtonRef = useRef(null);
+  const userMenuRef = useRef(null);
+  const loggingOutRef = useRef(false);
+  const { pathname } = useLocation();
 
   // Privy & Wagmi Hooks
   const {
@@ -32,7 +35,7 @@ export default function Header() {
     walletConnectors,
   } = usePrivy();
   const { wallets } = useWallets();
-  const { address: wagmiAddress, isConnected: isWagmiConnected, connector } = useAccount();
+  const { address: wagmiAddress, isConnected: isWagmiConnected, connector, status: wagmiStatus } = useAccount();
   const { setActiveWallet } = useSetActiveWallet();
   const { fundWallet } = useFundWallet();
   const { disconnect } = useDisconnect();
@@ -40,6 +43,10 @@ export default function Header() {
 
   // Combined logout: clear external wallet sessions, Wagmi connector cache, and Privy session
   const handleLogout = async (closeFn) => {
+    // Block the embedded-wallet auto-sync while sessions are being torn down (prevents an Email wallet
+    // from being re-activated in wagmi right after logout, before the user connects MetaMask).
+    loggingOutRef.current = true;
+    lastSyncedWalletRef.current = '';
     try {
       for (const w of wallets) {
         if (w.walletClientType !== 'privy' && typeof w.disconnect === 'function') {
@@ -58,6 +65,9 @@ export default function Header() {
       console.error('[Logout] Error during logout:', err);
     } finally {
       if (closeFn) closeFn();
+      setTimeout(() => {
+        loggingOutRef.current = false;
+      }, 1500);
     }
   };
 
@@ -81,33 +91,33 @@ export default function Header() {
     }
   }, [authenticated, embeddedWallet, externalWallet, wagmiAddress, user, createWallet]);
 
-  // Automatically synchronize Privy wallet (especially Email embedded wallet) with wagmi after F5 reload
+  // After F5 the Privy Email (embedded) wallet initializes later than wagmi, leaving wagmi's connector
+  // disconnected while useWallets() already holds the wallet. Re-attach ONLY the embedded wallet here:
+  // external wallets (MetaMask / WalletConnect) are restored by wagmi's own reconnect, and forcing them
+  // would trigger extra prompts in mobile MetaMask.
   useEffect(() => {
-    if (!ready || !wallets || wallets.length === 0) {
+    if (!ready || !authenticated || !embeddedWallet?.address) {
       lastSyncedWalletRef.current = '';
       return;
     }
-    if (isTxInProgress()) return;
+    if (loggingOutRef.current || isTxInProgress()) return;
+    if (wagmiStatus === 'connecting' || wagmiStatus === 'reconnecting') return;
 
-    const targetWallet =
-      (authenticated && embeddedWallet) ||
-      embeddedWallet ||
-      externalWallet ||
-      wallets[0];
+    // Never hijack an external-wallet session: only Email users (or users with no external wallet)
+    const prefersEmbedded = Boolean(user?.email) || !externalWallet;
+    if (!prefersEmbedded) return;
 
-    if (!targetWallet?.address) return;
-
-    const needsWagmiSync = !isWagmiConnected || !connector || !wagmiAddress;
-    if (!needsWagmiSync) {
+    if (isWagmiConnected && connector && wagmiAddress) {
       lastSyncedWalletRef.current = '';
       return;
     }
 
     if (typeof setActiveWallet === 'function') {
-      const syncKey = `${targetWallet.walletClientType}:${targetWallet.address.toLowerCase()}`;
+      const syncKey = `privy:${embeddedWallet.address.toLowerCase()}`;
       if (lastSyncedWalletRef.current !== syncKey) {
         lastSyncedWalletRef.current = syncKey;
-        Promise.resolve(setActiveWallet(targetWallet)).catch((err) => {
+        Promise.resolve(setActiveWallet(embeddedWallet)).catch((err) => {
+          lastSyncedWalletRef.current = '';
           console.warn('[Header] setActiveWallet sync note:', err?.message || err);
         });
       }
@@ -115,14 +125,33 @@ export default function Header() {
   }, [
     ready,
     authenticated,
-    wallets,
+    user,
     embeddedWallet,
     externalWallet,
     isWagmiConnected,
     connector,
     wagmiAddress,
+    wagmiStatus,
     setActiveWallet,
   ]);
+
+  // Close the mobile burger menu and the desktop wallet menu on every route change (incl. browser Back)
+  useEffect(() => {
+    setMenuOpen(false);
+    setUserMenuOpen(false);
+  }, [pathname]);
+
+  // Close the desktop wallet menu on an outside tap / click
+  useEffect(() => {
+    if (!userMenuOpen) return undefined;
+    const handlePointerDown = (e) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [userMenuOpen]);
 
   // Once an address is available, dismiss any Privy modal stuck on "Waiting for MetaMask"
   // without sending any extra RPC requests to the wallet.
@@ -254,7 +283,7 @@ export default function Header() {
                 </span>
               )}
               {isUserAuthenticated ? (
-                <div className="relative">
+                <div className="relative" ref={userMenuRef}>
                   <button
                     onClick={() => setUserMenuOpen(!userMenuOpen)}
                     className="border border-outline-variant/30 text-on-surface-variant px-4 py-1.5 rounded-full text-sm hover:bg-surface-tint hover:text-on-primary transition-colors flex items-center gap-2"

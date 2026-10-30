@@ -18,6 +18,7 @@ import {
   resolveActivePrivyWallet,
   sendContractWithPrivyFallback,
 } from '../utils/mobileWallet';
+import { findMintedMemorial, waitForMintedMemorial, isAmbiguousSendError } from '../utils/mintRecovery';
 import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
@@ -35,8 +36,7 @@ const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 
 const AI_CHECK_COLD_TIMEOUT_MS = 15000;       // 15s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once models are cached
 
-const THUMBNAIL_MAX_DIM = 800;
-const THUMBNAIL_QUALITY = 0.85;
+const AI_INPUT_MAX_DIM = 512;                 // px, photos are downscaled before TF.js to keep GPU memory tiny
 const TAB_WAKEUP_DELAY_MS = 180;              // 150-200ms pause after rAF so Android Chrome restores GPU/Canvas/WebGL context after Photo Picker
 const RETRY_DELAY_MS = 350;                   // 350ms delay before automatic silent retry of image decode / AI check
 
@@ -207,161 +207,66 @@ async function readFileAsDataUrlWithRetry(file) {
 }
 
 /**
- * Helper to load a URL (Data URL or ObjectURL) into an HTMLImageElement via standard onload
- * (never calling img.decode(), which throws EncodingError on valid JPEG/WebP on Android Chrome)
- * and downscale it on a 2D Canvas.
+ * Decodes the selected photo into a SMALL canvas (longest side AI_INPUT_MAX_DIM) for TF.js.
+ * Feeding a full 12-50 MP phone photo to TF.js allocates huge WebGL textures, which is the main
+ * trigger of WebGL context loss on Android Chrome. Prefers createImageBitmap(file) (no URL needed),
+ * falls back to an <img> decoding a fresh object URL. Never throws a cached failure: every call is fresh.
  */
-function renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const timer = setTimeout(() => {
-      img.onload = null;
-      img.onerror = null;
-      reject(new Error('Image load timeout'));
-    }, timeoutMs);
+async function createAiInputCanvas(file) {
+  let source = null;
+  let width = 0;
+  let height = 0;
+  let cleanup = () => {};
 
-    img.onload = () => {
-      clearTimeout(timer);
-      try {
-        const nw = img.naturalWidth || img.width;
-        const nh = img.naturalHeight || img.height;
-        if (!nw || !nh) {
-          reject(new Error('Invalid image dimensions'));
-          return;
-        }
-        const scale = Math.min(1, maxDim / Math.max(nw, nh));
-        const w = Math.max(1, Math.round(nw * scale));
-        const h = Math.max(1, Math.round(nh * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Canvas 2D context unavailable'));
-          return;
-        }
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, w, h);
-        ctx.drawImage(img, 0, 0, w, h);
-        const res = canvas.toDataURL('image/jpeg', quality);
-        canvas.width = 0;
-        canvas.height = 0;
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      source = bitmap;
+      width = bitmap.width;
+      height = bitmap.height;
+      cleanup = () => bitmap.close?.();
+    } catch {
+      // fall back to <img>
+    }
+  }
+
+  if (!source) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const candidate = new Image();
+        const timer = setTimeout(() => reject(new Error('Timed out decoding image for AI analysis')), 8000);
+        candidate.onload = () => { clearTimeout(timer); resolve(candidate); };
+        candidate.onerror = () => { clearTimeout(timer); reject(new Error('Failed to decode image for AI analysis')); };
+        candidate.src = url;
+      });
+      source = img;
+      width = img.naturalWidth || img.width;
+      height = img.naturalHeight || img.height;
+      cleanup = () => {
         img.onload = null;
         img.onerror = null;
-        if (res && res.startsWith('data:image/jpeg;base64,')) {
-          resolve(res);
-        } else {
-          reject(new Error('Canvas toDataURL produced empty output'));
-        }
-      } catch (e) {
-        reject(e);
-      }
-    };
+        img.src = '';
+        URL.revokeObjectURL(url);
+      };
+    } catch (err) {
+      URL.revokeObjectURL(url);
+      throw err;
+    }
+  }
 
-    img.onerror = () => {
-      clearTimeout(timer);
-      img.onload = null;
-      img.onerror = null;
-      reject(new Error('Image load error'));
-    };
-
-    img.src = srcUrl;
-  });
-}
-
-async function renderUrlToCanvasJpegWithRetry(srcUrl, maxDim, quality, timeoutMs = 8000) {
   try {
-    return await renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs);
-  } catch (err1) {
-    console.warn('[CreateMemorial] Canvas decode 1st attempt failed, retrying after 350ms:', err1?.message || err1);
-    await sleep(RETRY_DELAY_MS);
-    return await renderUrlToCanvasJpeg(srcUrl, maxDim, quality, timeoutMs);
-  }
-}
-
-// Non-blocking fallback SVG preview used only when an exotic mobile format (e.g. raw HEIC)
-// cannot be rendered by the browser's <img> tag, while still allowing the file to be uploaded.
-const FALLBACK_PORTRAIT_SVG_DATA_URL =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">' +
-      '<rect width="600" height="400" fill="#f5f3f0"/>' +
-      '<circle cx="300" cy="175" r="44" fill="#ebdcd1"/>' +
-      '<path d="M286 168c0-8 6-14 14-14s14 6 14 14-6 14-14 14-14-6-14-14zm-18 36c6-12 18-18 32-18s26 6 32 18" stroke="#8a4f36" stroke-width="4" fill="none" stroke-linecap="round"/>' +
-      '<text x="300" y="255" text-anchor="middle" font-family="Georgia, serif" font-size="18" fill="#53433e">Portrait Selected &amp; Ready</text>' +
-      '<text x="300" y="282" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#85736d">Your photo will be preserved on-chain</text>' +
-    '</svg>'
-  );
-
-/**
- * Universal multi-stage proportional thumbnail generator (Data URL max 800px) with automatic retry:
- * - Attempt 1: FileReader.readAsDataURL(file) + renderUrlToCanvasJpegWithRetry (with 350ms retry)
- * - Attempt 2: URL.createObjectURL(file) + renderUrlToCanvasJpegWithRetry (with 350ms retry)
- * - Attempt 3: Always preserve the valid FileReader rawDataUrl if Canvas resize failed, never replacing
- *   a valid FileReader Data URL with the SVG placeholder.
- */
-async function generateThumbnail(
-  file,
-  maxDim = THUMBNAIL_MAX_DIM,
-  quality = THUMBNAIL_QUALITY,
-  registerObjectUrl = null,
-  preloadedRawDataUrl = ''
-) {
-  if (!file || file.size === 0) return null;
-
-  let rawDataUrl = preloadedRawDataUrl || '';
-  let rawObjectUrl = '';
-
-  // Attempt 1: FileReader Data URL + Canvas resize (with automatic 350ms retry)
-  try {
-    if (!rawDataUrl) {
-      rawDataUrl = await readFileAsDataUrlWithRetry(file);
-    }
-    if (rawDataUrl) {
-      if (file.type === 'image/gif') {
-        return rawDataUrl;
-      }
-      const resizedFromDataUrl = await renderUrlToCanvasJpegWithRetry(rawDataUrl, maxDim, quality);
-      if (resizedFromDataUrl) {
-        return resizedFromDataUrl;
-      }
-    }
-  } catch (err1) {
-    console.warn('[CreateMemorial] Thumbnail Attempt 1 (FileReader + Canvas) note:', err1?.message || err1);
-  }
-
-  // Attempt 2: URL.createObjectURL(file) + Canvas resize (with automatic 350ms retry)
-  try {
-    rawObjectUrl = URL.createObjectURL(file);
-    if (typeof registerObjectUrl === 'function') {
-      registerObjectUrl(rawObjectUrl);
-    }
-    if (file.type === 'image/gif') {
-      return rawDataUrl || rawObjectUrl;
-    }
-    const resizedFromObjectUrl = await renderUrlToCanvasJpegWithRetry(rawObjectUrl, maxDim, quality);
-    if (resizedFromObjectUrl) {
-      return resizedFromObjectUrl;
-    }
-  } catch (err2) {
-    console.warn('[CreateMemorial] Thumbnail Attempt 2 (ObjectURL + Canvas) note:', err2?.message || err2);
-  }
-
-  // Attempt 3: Always prefer the real FileReader Data URL over any fallback so <img> renders the real photo
-  if (rawDataUrl) {
-    return rawDataUrl;
-  }
-  if (rawObjectUrl) {
-    return rawObjectUrl;
-  }
-  try {
-    const fallbackObjectUrl = URL.createObjectURL(file);
-    if (typeof registerObjectUrl === 'function') {
-      registerObjectUrl(fallbackObjectUrl);
-    }
-    return fallbackObjectUrl;
-  } catch {
-    return FALLBACK_PORTRAIT_SVG_DATA_URL;
+    if (!width || !height) throw new Error('Invalid image dimensions');
+    const scale = Math.min(1, AI_INPUT_MAX_DIM / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D context unavailable');
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } finally {
+    cleanup();
   }
 }
 
@@ -534,6 +439,44 @@ async function preloadAiModels() {
   }
 }
 
+/**
+ * Permanently (for this page session) moves TF.js to the CPU backend and drops the cached models,
+ * whose weights lived in the lost WebGL context. Called when inference fails on WebGL, which happens
+ * on Android Chrome after the tab was backgrounded by the system Photo Picker (WebGL context loss).
+ */
+let cpuFallbackPromise = null;
+async function switchTfToCpuBackend() {
+  if (!cpuFallbackPromise) {
+    cpuFallbackPromise = (async () => {
+      try {
+        const tf = await ensureTfReady();
+        if (tf.getBackend() === 'cpu') return true;
+        console.warn('[AI Analysis] Switching TF.js backend from', tf.getBackend(), 'to cpu after a WebGL failure.');
+        await tf.setBackend('cpu');
+        await tf.ready();
+        cachedFaceModelPromise = null;
+        cachedObjectModelPromise = null;
+        isAiWarm = false;
+        return true;
+      } catch (err) {
+        console.warn('[AI Analysis] CPU backend fallback failed:', err?.message || err);
+        cpuFallbackPromise = null;
+        return false;
+      }
+    })();
+  }
+  return cpuFallbackPromise;
+}
+
+async function getActiveTfBackend() {
+  try {
+    const tf = await ensureTfReady();
+    return tf.getBackend();
+  } catch {
+    return '';
+  }
+}
+
 export default function CreateMemorial() {
   const { ready, authenticated, connectWallet, login, user } = usePrivy();
   const { wallets } = useWallets();
@@ -579,6 +522,8 @@ export default function CreateMemorial() {
   const [isInitiating, setIsInitiating] = useState(false); // Immediate sync lock on click to prevent multi-mint
   const [txHash, setTxHash] = useState(null);
   const [unconfirmedTxHash, setUnconfirmedTxHash] = useState(null); // Receipt could not be confirmed (timeout / RPC)
+  const [recoveredMint, setRecoveredMint] = useState(null); // { tokenId } of an already-minted memorial found on-chain
+  const [isVerifyingMint, setIsVerifyingMint] = useState(false); // On-chain duplicate check in progress
   const [mintedIsPublic, setMintedIsPublic] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
@@ -587,22 +532,26 @@ export default function CreateMemorial() {
   // Pending tx hash the user explicitly chose to override after it could not be confirmed
   const acknowledgedPendingTxRef = useRef(null);
 
-  // Photo processing progress state (instant visual feedback on file selection)
-  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
-  const [photoProgress, setPhotoProgress] = useState(0);
-
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
   // Dedicated file input ref for reliable reset across repeated creations
   const fileInputRef = useRef(null);
 
-  // Current preview URL, raw FileReader Data URL, and tracked ObjectURLs so blob URLs are NEVER revoked mid-read/render,
-  // and a valid FileReader Data URL is never replaced by a placeholder unless <img> itself fails after retries.
-  const previewUrlRef = useRef('');
-  const rawDataUrlRef = useRef('');
-  const imgErrorRetryCountRef = useRef(0);
-  const [imgRetryTick, setImgRetryTick] = useState(0);
+  /*
+   * Photo preview model (identical rendering on Step 1 and Step 3):
+   *   1. A fresh `URL.createObjectURL(file)` is rendered immediately — no canvas / resize / AI step can
+   *      ever replace the <img> with a placeholder.
+   *   2. Only if the <img> element itself fires onError: retry with a NEW object URL (Android Chrome may
+   *      fail the very first frame after returning from the Photo Picker), then with a FileReader data URL.
+   *   3. The "Portrait Selected & Ready" placeholder appears only when ALL sources failed in the <img>
+   *      (e.g. HEIC on a browser without HEIC support). Removing / re-selecting resets everything and
+   *      bumps `previewKey` so React mounts a brand-new <img>.
+   */
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const [previewKey, setPreviewKey] = useState(0);
+  const previewAttemptRef = useRef(0); // 0 = objectUrl, 1 = fresh objectUrl, 2 = dataUrl
+  const previewRecoveringRef = useRef(false);
   const objectUrlsRef = useRef(new Set());
 
   const registerObjectUrl = useCallback((url) => {
@@ -642,31 +591,31 @@ export default function CreateMemorial() {
   useEffect(() => {
     return () => {
       revokeTrackedObjectUrls();
-      previewUrlRef.current = '';
-      rawDataUrlRef.current = '';
-      imgErrorRetryCountRef.current = 0;
       resetAiModeration();
     };
   }, [revokeTrackedObjectUrls]);
 
-  const handleRemoveImage = useCallback(() => {
+  /** Fully clears the photo, its preview sources, every preview error flag and the AI check state. */
+  const clearPhotoState = useCallback(() => {
     analysisRunIdRef.current += 1;
     revokeTrackedObjectUrls();
-    previewUrlRef.current = '';
-    rawDataUrlRef.current = '';
-    imgErrorRetryCountRef.current = 0;
-    setImgRetryTick(0);
+    previewAttemptRef.current = 0;
+    previewRecoveringRef.current = false;
     if (fileInputRef.current) fileInputRef.current.value = '';
     setPhoto(null);
     setPreviewUrl('');
-    setIsProcessingPhoto(false);
-    setPhotoProgress(0);
-    setError(null);
+    setPreviewFailed(false);
+    setPreviewKey((k) => k + 1);
     setCheckStatus('idle');
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
   }, [revokeTrackedObjectUrls]);
+
+  const handleRemoveImage = useCallback(() => {
+    clearPhotoState();
+    setError(null);
+  }, [clearPhotoState]);
 
   const { writeContractAsync } = useWriteContract();
   const {
@@ -776,7 +725,6 @@ export default function CreateMemorial() {
 
   // Complete reset of form state
   const resetFormState = useCallback(() => {
-    analysisRunIdRef.current += 1;
     setStep(0);
     setPetName('');
     setSpecies('');
@@ -786,32 +734,20 @@ export default function CreateMemorial() {
     setBirthYear('');
     setPassingYear('');
     setDescription('');
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    setPhoto(null);
-    revokeTrackedObjectUrls();
-    previewUrlRef.current = '';
-    rawDataUrlRef.current = '';
-    imgErrorRetryCountRef.current = 0;
-    setImgRetryTick(0);
-    setPreviewUrl('');
-    setIsProcessingPhoto(false);
-    setPhotoProgress(0);
+    clearPhotoState();
     setIsPublic(false);
-    setCheckStatus('idle');
-    setDetectedPerson(false);
-    setDetectedAnimal(true);
-    setHumanConsentGiven(false);
     setFlowStep(0);
     setError(null);
     setIsMinting(false);
     setIsInitiating(false);
     setTxHash(null);
+    setRecoveredMint(null);
     setUnconfirmedTxHash(null);
     acknowledgedPendingTxRef.current = null;
     setMintedIsPublic(false);
     setShowShareModal(false);
     resetAiModeration();
-  }, [revokeTrackedObjectUrls]);
+  }, [clearPhotoState]);
 
   // Initialize clean state and check for saved draft on mount
   useEffect(() => {
@@ -829,28 +765,38 @@ export default function CreateMemorial() {
     }
   }, [resetFormState]);
 
+  // Success = confirmed receipt of our tx, OR a memorial for this upload found on-chain (dedup recovery)
+  const showSuccess = isSuccess || Boolean(recoveredMint);
+
   // Clear draft & photo states on successful transaction confirmation
   useEffect(() => {
-    if (isSuccess) {
+    if (showSuccess) {
       persistDraft(null);
       setUnconfirmedTxHash(null);
       acknowledgedPendingTxRef.current = null;
-      analysisRunIdRef.current += 1;
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      setPhoto(null);
-      revokeTrackedObjectUrls();
-      previewUrlRef.current = '';
-      rawDataUrlRef.current = '';
-      imgErrorRetryCountRef.current = 0;
-      setImgRetryTick(0);
-      setPreviewUrl('');
-      setIsProcessingPhoto(false);
-      setPhotoProgress(0);
-      setCheckStatus('idle');
+      clearPhotoState();
       setError(null);
       resetAiModeration();
     }
-  }, [isSuccess, persistDraft, revokeTrackedObjectUrls]);
+  }, [showSuccess, persistDraft, clearPhotoState]);
+
+  // Mobile UX: the error banner sits above the form, so a failed Continue / submit tapped at the bottom of
+  // a phone screen would be invisible — bring the message into view whenever it appears.
+  const errorBannerRef = useRef(null);
+  useEffect(() => {
+    if (!error || !errorBannerRef.current) return;
+    errorBannerRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [error]);
+
+  // Mobile UX: every wizard transition (Continue / Back / success screen) starts at the top of the page
+  const hasMountedStepRef = useRef(false);
+  useEffect(() => {
+    if (!hasMountedStepRef.current) {
+      hasMountedStepRef.current = true;
+      return;
+    }
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [step, showSuccess]);
 
   // Read creation_fee from contract
   const { data: creationFeeRaw, refetch: refetchCreationFee } = useReadContract({
@@ -875,44 +821,16 @@ export default function CreateMemorial() {
     isFeeKnown && balance?.value !== undefined && balance.value < creationFee + GAS_BUFFER_WEI
   );
 
-  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) with automatic retry ── */
-  const runAiCheck = useCallback(async (imageUrl) => {
-    // 1. Ensure TFJS backend is ready and models are loaded
+  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) ── */
+
+  // One inference pass on the CURRENT TF.js backend, on a small downscaled copy of the photo.
+  const runAiInference = useCallback(async (file) => {
     await ensureTfReady();
     const [faceModel, objectModel] = await Promise.all([
       getFaceModel(),
       getObjectModel(),
     ]);
-
-    const loadAiImageOnce = (src) => new Promise((resolve, reject) => {
-      const candidate = new Image();
-      const timer = setTimeout(() => {
-        candidate.onload = null;
-        candidate.onerror = null;
-        reject(new Error('Timed out loading image for AI analysis'));
-      }, 6000);
-      candidate.onload = () => {
-        clearTimeout(timer);
-        resolve(candidate);
-      };
-      candidate.onerror = () => {
-        clearTimeout(timer);
-        candidate.onload = null;
-        candidate.onerror = null;
-        reject(new Error('Failed to load image for AI analysis'));
-      };
-      candidate.src = src;
-    });
-
-    let img;
-    try {
-      img = await loadAiImageOnce(imageUrl);
-    } catch (loadErr) {
-      console.warn('[AI Analysis] Image decode 1st attempt failed, retrying after 350ms:', loadErr?.message || loadErr);
-      await sleep(RETRY_DELAY_MS);
-      const fallbackSrc = rawDataUrlRef.current || imageUrl;
-      img = await loadAiImageOnce(fallbackSrc);
-    }
+    const input = await createAiInputCanvas(file);
 
     let faces = [];
     let predictions = [];
@@ -920,25 +838,28 @@ export default function CreateMemorial() {
     let objectFailed = false;
 
     try {
-      faces = await faceModel.estimateFaces(img, false);
+      faces = await faceModel.estimateFaces(input, false);
     } catch (faceErr) {
       faceFailed = true;
       console.warn('[AI Analysis] Face detection warning:', faceErr);
     }
 
     try {
-      predictions = await objectModel.detect(img);
+      predictions = await objectModel.detect(input);
     } catch (objErr) {
       objectFailed = true;
       console.warn('[AI Analysis] Object detection warning:', objErr);
     } finally {
-      img.onload = null;
-      img.onerror = null;
-      img.src = '';
+      input.width = 0;
+      input.height = 0;
     }
 
     if (faceFailed && objectFailed) {
-      throw new Error('Both AI models failed during inference (graphics context still waking up)');
+      throw new Error('Both AI models failed during inference (graphics context lost)');
+    }
+    // A partial failure on WebGL usually means the GPU context is dying: let the caller retry on CPU
+    if ((faceFailed || objectFailed) && (await getActiveTfBackend()) !== 'cpu') {
+      throw new Error('Partial AI inference failure on the GPU backend');
     }
 
     const animalClasses = ['cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'];
@@ -971,45 +892,45 @@ export default function CreateMemorial() {
     };
   }, []);
 
-  /* Background AI verification pipeline: runs with dynamic timeout (cold: 15s, warm: 5s)
-   * and an automatic 350ms retry if the first check fails while mobile Chrome wakes up. */
-  const processSelectedImage = useCallback(async (file, imagePreviewUrl, runId) => {
+  // Inference with an automatic WebGL -> CPU backend fallback (Android WebGL context loss after backgrounding)
+  const runAiCheck = useCallback(async (file) => {
+    try {
+      return await runAiInference(file);
+    } catch (err) {
+      const backend = await getActiveTfBackend();
+      if (backend && backend !== 'cpu') {
+        console.warn(`[AI Analysis] Inference failed on "${backend}" backend, retrying on CPU:`, err?.message || err);
+        const switched = await switchTfToCpuBackend();
+        if (switched) return await runAiInference(file);
+      }
+      throw err;
+    }
+  }, [runAiInference]);
+
+  /* Background AI verification pipeline: dynamic timeout (cold: 15s, warm: 5s). If the first attempt fails or
+   * hangs (typical for a lost WebGL context), TF.js is moved to the CPU backend and the check is retried once. */
+  const processSelectedImage = useCallback(async (file, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
+    const runWithTimeout = (timeoutMs) => Promise.race([
+      runAiCheck(file).catch((err) => {
+        console.warn('[AI Analysis] Attempt failed:', err?.message || err);
+        return null;
+      }),
+      new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+
     try {
       if (!isCurrent()) return;
-
-      let aiUrl =
-        (imagePreviewUrl && imagePreviewUrl !== FALLBACK_PORTRAIT_SVG_DATA_URL ? imagePreviewUrl : '') ||
-        rawDataUrlRef.current ||
-        (previewUrlRef.current && previewUrlRef.current !== FALLBACK_PORTRAIT_SVG_DATA_URL ? previewUrlRef.current : '');
-
-      if (!aiUrl) {
-        const tempUrl = URL.createObjectURL(file);
-        registerObjectUrl(tempUrl);
-        aiUrl = tempUrl;
-      }
-
-      const runWithTimeout = (targetUrl, timeoutMs) => Promise.race([
-        runAiCheck(targetUrl).catch((err) => {
-          console.warn('[AI Analysis] Attempt failed:', err?.message || err);
-          return null;
-        }),
-        new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-      ]);
-
-      const firstTimeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
-      let result = await runWithTimeout(aiUrl, firstTimeoutMs);
+      let result = await runWithTimeout(isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS);
       if (!isCurrent()) return;
 
-      // Self-healing retry: if the 1st AI check attempt failed right after returning from Android Photo Picker,
-      // wait 350ms for WebGL/CPU backend recovery and retry once before marking as skipped.
       if (!result) {
-        console.warn('[AI Analysis] 1st attempt returned null, retrying after 350ms...');
+        console.warn('[AI Analysis] 1st attempt returned no result, retrying on the CPU backend...');
         await sleep(RETRY_DELAY_MS);
         if (!isCurrent()) return;
-        const retryUrl = rawDataUrlRef.current || aiUrl;
-        const retryTimeoutMs = isAiWarm ? AI_CHECK_WARM_TIMEOUT_MS : AI_CHECK_COLD_TIMEOUT_MS;
-        result = await runWithTimeout(retryUrl, retryTimeoutMs);
+        if ((await getActiveTfBackend()) !== 'cpu') await switchTfToCpuBackend();
+        if (!isCurrent()) return;
+        result = await runWithTimeout(AI_CHECK_COLD_TIMEOUT_MS);
         if (!isCurrent()) return;
       }
 
@@ -1022,14 +943,14 @@ export default function CreateMemorial() {
         }
         setCheckStatus('accepted');
       } else {
-        console.warn('[AI Analysis] Timed out or unavailable after retry — check skipped.');
+        console.warn('[AI Analysis] Timed out or unavailable after CPU retry — check skipped.');
         setCheckStatus('skipped');
       }
     } catch (err) {
-      console.warn('[CreateMemorial] Image processing error, check skipped:', err?.message || err);
+      console.warn('[CreateMemorial] Image check error, check skipped:', err?.message || err);
       if (isCurrent()) setCheckStatus('skipped');
     }
-  }, [runAiCheck, registerObjectUrl]);
+  }, [runAiCheck]);
 
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
@@ -1054,141 +975,99 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     setError(null);
 
-    imgErrorRetryCountRef.current = 0;
-    rawDataUrlRef.current = '';
-    setImgRetryTick(0);
+    // Fresh preview source for THIS selection: previous URLs revoked, every preview error flag reset,
+    // and a new <img> key so React mounts a brand-new element.
+    revokeTrackedObjectUrls();
+    previewAttemptRef.current = 0;
+    previewRecoveringRef.current = false;
+    let objectUrl = '';
+    try {
+      objectUrl = URL.createObjectURL(file);
+      registerObjectUrl(objectUrl);
+    } catch (urlErr) {
+      console.warn('[CreateMemorial] createObjectURL unavailable, using FileReader preview:', urlErr?.message || urlErr);
+    }
 
-    // Keep the selected File in state immediately so React re-renders never see !photo during decoding
     setPhoto(file);
-    setIsProcessingPhoto(true);
-    setPhotoProgress(20);
+    setPreviewFailed(false);
+    setPreviewKey((k) => k + 1);
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
     setCheckStatus('checking');
 
-    // 1. Always read the real photo via FileReader (data: URL) first (with automatic 350ms retry)
-    //    and immediately set it as previewUrl so <img src={previewUrl} /> renders the real image.
-    let rawDataUrl = '';
-    try {
-      rawDataUrl = await readFileAsDataUrlWithRetry(file);
-    } catch (readErr) {
-      console.warn('[CreateMemorial] Initial FileReader read note:', readErr?.message || readErr);
+    if (objectUrl) {
+      setPreviewUrl(objectUrl);
+    } else {
+      previewAttemptRef.current = 2;
+      setPreviewUrl('');
+      try {
+        const dataUrl = await readFileAsDataUrlWithRetry(file);
+        if (!isCurrent()) return;
+        setPreviewUrl(dataUrl);
+      } catch (readErr) {
+        console.warn('[CreateMemorial] FileReader preview failed:', readErr?.message || readErr);
+        if (!isCurrent()) return;
+        setPreviewFailed(true);
+      }
     }
-    if (!isCurrent()) return;
 
-    if (rawDataUrl) {
-      rawDataUrlRef.current = rawDataUrl;
-      previewUrlRef.current = rawDataUrl;
-      setPreviewUrl(rawDataUrl);
-      setPhotoProgress(55);
-    }
-
-    // 2. Wait for requestAnimationFrame + 180ms so Android Chrome finishes restoring its
-    //    graphics/Canvas/WebGL context after returning from the system Photo Picker.
+    // Give Android Chrome a moment to restore its graphics context after the Photo Picker, then run the
+    // informational AI check in the background (it never touches the preview).
     await waitForTabWakeup(TAB_WAKEUP_DELAY_MS);
     if (!isCurrent()) return;
-
-    // 3. Generate proportional Canvas thumbnail (with automatic 350ms retry).
-    //    Never overwrite a valid FileReader rawDataUrl with the SVG placeholder!
-    let thumbUrl = rawDataUrl;
-    try {
-      setPhotoProgress(75);
-      const generated = await generateThumbnail(
-        file,
-        THUMBNAIL_MAX_DIM,
-        THUMBNAIL_QUALITY,
-        registerObjectUrl,
-        rawDataUrl
-      );
-      if (generated && (generated !== FALLBACK_PORTRAIT_SVG_DATA_URL || !rawDataUrl)) {
-        thumbUrl = generated;
-      }
-      setPhotoProgress(90);
-    } catch (e) {
-      console.warn('[CreateMemorial] Thumbnail note, keeping FileReader dataUrl:', e);
-    }
-    if (!isCurrent()) {
-      // A newer selection (or removal) owns the photo UI state now — leave it untouched
-      return;
-    }
-
-    // Ultimate Fallback only when even FileReader could not produce a dataUrl
-    if (!thumbUrl) {
-      try {
-        thumbUrl = URL.createObjectURL(file);
-        registerObjectUrl(thumbUrl);
-      } catch {
-        thumbUrl = FALLBACK_PORTRAIT_SVG_DATA_URL;
-      }
-    }
-
-    setPhotoProgress(100);
-    revokeTrackedObjectUrls(thumbUrl);
-    previewUrlRef.current = thumbUrl;
-    setPhoto(file);
-    setPreviewUrl(thumbUrl);
-    setIsProcessingPhoto(false);
-
-    // 4. Run non-blocking AI verification in background (with automatic 350ms retry)
-    processSelectedImage(file, thumbUrl, runId);
+    processSelectedImage(file, runId);
   }, [processSelectedImage, registerObjectUrl, revokeTrackedObjectUrls]);
 
+  /**
+   * <img> onError recovery (Step 1 and Step 3 share it):
+   * object URL -> fresh object URL (after a wake-up pause) -> FileReader data URL -> placeholder.
+   */
   const handleImageError = useCallback(async () => {
-    if (!photo) return;
+    if (!photo || previewRecoveringRef.current) return;
+    const file = photo;
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
+    previewRecoveringRef.current = true;
 
-    // Self-healing retry: if <img> fired onError in the first frames while mobile Chrome was waking up
-    // from the Android Photo Picker, wait 350ms + rAF and retry rendering the real FileReader dataUrl.
-    if (imgErrorRetryCountRef.current < 2) {
-      imgErrorRetryCountRef.current += 1;
-      console.warn(
-        `[CreateMemorial] <img> preview load error (attempt ${imgErrorRetryCountRef.current}), retrying after 350ms wakeup...`
-      );
-      await waitForTabWakeup(RETRY_DELAY_MS);
-      if (!isCurrent()) return;
-
-      let recoveryDataUrl = rawDataUrlRef.current;
-      if (!recoveryDataUrl) {
+    try {
+      if (previewAttemptRef.current === 0) {
+        console.warn('[CreateMemorial] <img> preview error, retrying with a fresh object URL...');
+        await waitForTabWakeup(RETRY_DELAY_MS);
+        if (!isCurrent()) return;
+        previewAttemptRef.current = 1;
         try {
-          recoveryDataUrl = await readFileAsDataUrlWithRetry(photo);
-          if (recoveryDataUrl && isCurrent()) {
-            rawDataUrlRef.current = recoveryDataUrl;
-          }
-        } catch {
-          // ignore
-        }
-      }
-      if (!isCurrent()) return;
-
-      if (recoveryDataUrl) {
-        previewUrlRef.current = recoveryDataUrl;
-        setPreviewUrl(recoveryDataUrl);
-        setImgRetryTick((t) => t + 1);
-        return;
-      }
-
-      if (imgErrorRetryCountRef.current === 1) {
-        try {
-          const directBlobUrl = URL.createObjectURL(photo);
-          registerObjectUrl(directBlobUrl);
-          previewUrlRef.current = directBlobUrl;
-          setPreviewUrl(directBlobUrl);
-          setImgRetryTick((t) => t + 1);
+          const freshUrl = URL.createObjectURL(file);
+          registerObjectUrl(freshUrl);
+          setPreviewUrl(freshUrl);
+          setPreviewKey((k) => k + 1);
           return;
         } catch {
-          // fall through
+          // fall through to the FileReader source
         }
       }
-    }
 
-    // Ultimate Fallback: only reached if <img> genuinely cannot render even the FileReader dataUrl
-    // after wakeup + retries (e.g., an unsupported raw HEIC codec).
-    console.warn('[CreateMemorial] <img> could not decode format after retries, showing SVG placeholder.');
-    if (previewUrlRef.current !== FALLBACK_PORTRAIT_SVG_DATA_URL) {
-      previewUrlRef.current = FALLBACK_PORTRAIT_SVG_DATA_URL;
-      setPreviewUrl(FALLBACK_PORTRAIT_SVG_DATA_URL);
+      if (previewAttemptRef.current <= 1) {
+        console.warn('[CreateMemorial] <img> object URL failed again, retrying with a FileReader data URL...');
+        previewAttemptRef.current = 2;
+        try {
+          const dataUrl = await readFileAsDataUrlWithRetry(file);
+          if (!isCurrent()) return;
+          setPreviewUrl(dataUrl);
+          setPreviewKey((k) => k + 1);
+          return;
+        } catch (readErr) {
+          console.warn('[CreateMemorial] FileReader preview failed:', readErr?.message || readErr);
+        }
+        if (!isCurrent()) return;
+      }
+
+      // Every source failed inside <img> itself (e.g. HEIC without browser support): show the placeholder.
+      // The original file is still uploaded as-is.
+      console.warn('[CreateMemorial] Browser cannot render this photo format, showing placeholder.');
+      setPreviewFailed(true);
+    } finally {
+      if (isCurrent()) previewRecoveringRef.current = false;
     }
   }, [photo, registerObjectUrl]);
 
@@ -1311,6 +1190,44 @@ export default function CreateMemorial() {
 
   const FEE_UNAVAILABLE_MESSAGE = 'Could not load the current creation fee from the contract. Please check your connection and try again.';
 
+  /**
+   * On-chain deduplication: looks the Arweave metadata upload up on-chain BEFORE any (re)send.
+   * If a memorial with this metadata already exists, nothing is minted again: the original tx is reused
+   * (normal receipt flow) or, when only the token id is known, the success screen is shown directly.
+   * @returns {Promise<{ tokenId: string, txHash: string | null } | null>}
+   */
+  const recoverExistingMint = async ({ metadataTxId, name, isPublicFlag, poll = false }) => {
+    if (!metadataTxId || !publicClient || !contractAddress) return null;
+    const lookup = { publicClient, contractAddress, abi: CONTRACT_ABI, metadataTxId };
+    setIsVerifyingMint(true);
+    let found = null;
+    try {
+      found = poll
+        ? await waitForMintedMemorial(lookup, { attempts: 8, intervalMs: 4000 })
+        : await findMintedMemorial(lookup);
+    } catch (lookupErr) {
+      console.warn('[CreateMemorial] On-chain duplicate check failed:', lookupErr?.shortMessage || lookupErr);
+    } finally {
+      setIsVerifyingMint(false);
+    }
+    if (!found) return null;
+
+    console.log('[CreateMemorial] Memorial already exists on-chain for this upload — not minting again:', found);
+    setPetName(name);
+    setIsPublic(Boolean(isPublicFlag));
+    setMintedIsPublic(Boolean(isPublicFlag));
+    setError('');
+    setUnconfirmedTxHash(null);
+    acknowledgedPendingTxRef.current = null;
+    if (found.txHash) {
+      setFlowStep(3);
+      setTxHash(found.txHash);
+    } else {
+      setRecoveredMint({ tokenId: found.tokenId });
+    }
+    return found;
+  };
+
   /* ── Submit flow: Arweave upload → mint ──────────────── */
   const handleSubmit = async (e) => {
     if (e) e.preventDefault();
@@ -1324,6 +1241,7 @@ export default function CreateMemorial() {
 
     let phase = 'preflight'; // preflight | upload | mint
     let sentHash = null;
+    let mintContext = null; // { metadataTxId, name, isPublicFlag } once the metadata upload is saved in the draft
     try {
       const name = petName.trim();
       const nameError = validatePetName(name);
@@ -1372,9 +1290,11 @@ export default function CreateMemorial() {
         metadataTxId,
         petName: name,
         isPublic,
+        owner: account,
         createdAt: Date.now(),
       };
       persistDraft(draftData);
+      mintContext = { metadataTxId, name, isPublicFlag: Boolean(isPublic) };
 
       phase = 'mint';
       setFlowStep(3);
@@ -1404,9 +1324,22 @@ export default function CreateMemorial() {
       } else if (isUserRejection(err)) {
         setError('Transaction cancelled in your wallet.');
       } else {
-        const message = formatTxError(err, 'Minting failed. Please try again.');
-        if (/creation fee changed/i.test(message)) refetchCreationFee();
-        setError(message);
+        // Mobile wallets (MetaMask over WalletConnect) often broadcast the tx but lose the response
+        // ("An unknown RPC error occurred."). Check the chain before telling the user anything failed.
+        const recovered = mintContext
+          ? await recoverExistingMint({ ...mintContext, poll: isAmbiguousSendError(err) })
+          : null;
+        if (recovered) {
+          sentHash = recovered.txHash || null;
+        } else {
+          const message = formatTxError(err, 'Minting failed. Please try again.');
+          if (/creation fee changed/i.test(message)) refetchCreationFee();
+          setError(
+            mintContext && isAmbiguousSendError(err)
+              ? `${message} No memorial was found on-chain for this upload, so it is safe to use "Resume Minting".`
+              : message
+          );
+        }
       }
     } finally {
       setTxInProgress(false);
@@ -1435,12 +1368,22 @@ export default function CreateMemorial() {
         setError(`${nameError.replace(/\.?$/, '.')} Please discard this draft and create the memorial again.`);
         return;
       }
+      const draftPublic = Boolean(targetDraft.isPublic ?? false);
+      const mintContext = { metadataTxId: targetDraft.metadataTxId, name, isPublicFlag: draftPublic };
+
+      // On-chain deduplication FIRST (works with any connected account, even with an empty balance):
+      // a previous attempt may have been mined even though the wallet reported an RPC error.
+      const alreadyMinted = await recoverExistingMint(mintContext);
+      if (alreadyMinted) {
+        sentHash = alreadyMinted.txHash || null;
+        return;
+      }
+
       if (isInsufficientFunds) { setError(INSUFFICIENT_FUNDS_MESSAGE); return; }
 
       const walletError = await ensureWalletReady();
       if (walletError) { setError(walletError); return; }
       const account = wagmiAddress || activeUserAddress;
-      const draftPublic = Boolean(targetDraft.isPublic ?? false);
 
       // A transaction for this draft was already broadcast: check its outcome before paying again
       const pendingHash = targetDraft.pendingTxHash;
@@ -1501,9 +1444,19 @@ export default function CreateMemorial() {
       if (isUserRejection(err)) {
         setError('Transaction cancelled in your wallet.');
       } else {
-        const message = formatTxError(err, 'Minting failed. Please try again.');
-        if (/creation fee changed/i.test(message)) refetchCreationFee();
-        setError(message);
+        const recovered = await recoverExistingMint({
+          metadataTxId: targetDraft.metadataTxId,
+          name: String(targetDraft.petName || '').trim(),
+          isPublicFlag: Boolean(targetDraft.isPublic ?? false),
+          poll: isAmbiguousSendError(err),
+        });
+        if (recovered) {
+          sentHash = recovered.txHash || null;
+        } else {
+          const message = formatTxError(err, 'Minting failed. Please try again.');
+          if (/creation fee changed/i.test(message)) refetchCreationFee();
+          setError(message);
+        }
       }
     } finally {
       setTxInProgress(false);
@@ -1525,14 +1478,15 @@ export default function CreateMemorial() {
   const todayISO = getTodayISO();
   const currentYear = new Date().getFullYear();
 
-  const isSubmitting = isInitiating || flowStep > 0 || isMinting || isConfirming || (Boolean(txHash) && !isSuccess);
+  const isSubmitting = isInitiating || flowStep > 0 || isMinting || isConfirming || isVerifyingMint || (Boolean(txHash) && !isSuccess);
+  const finalTokenId = createdTokenId || recoveredMint?.tokenId || null;
 
   /* ── Success screen ────────────────────────────────────── */
-  if (isSuccess) {
+  if (showSuccess) {
     const isPublicTribute = Boolean(mintedIsPublic);
-    const memorialTargetUrl = createdTokenId ? `/memorial/${createdTokenId}` : '/my';
-    const memorialShareUrl = createdTokenId
-      ? `${typeof window !== 'undefined' ? window.location.origin : ''}${import.meta.env.BASE_URL}#/memorial/${createdTokenId}`
+    const memorialTargetUrl = finalTokenId ? `/memorial/${finalTokenId}` : '/my';
+    const memorialShareUrl = finalTokenId
+      ? `${typeof window !== 'undefined' ? window.location.origin : ''}${import.meta.env.BASE_URL}#/memorial/${finalTokenId}`
       : (typeof window !== 'undefined' ? window.location.href : '');
 
     return (
@@ -1630,7 +1584,7 @@ export default function CreateMemorial() {
           isOpen={showShareModal}
           onClose={() => setShowShareModal(false)}
           petName={petName}
-          memorialId={createdTokenId || ''}
+          memorialId={finalTokenId || ''}
           url={memorialShareUrl}
         />
       </div>
@@ -1826,7 +1780,7 @@ export default function CreateMemorial() {
         )}
 
         {error && (
-          <div className="mb-6 bg-[#ffdad6] border border-[#ba1a1a]/20 rounded-xl px-4 py-3 text-sm text-[#93000a]">
+          <div ref={errorBannerRef} role="alert" className="mb-6 scroll-mt-28 bg-[#ffdad6] border border-[#ba1a1a]/20 rounded-xl px-4 py-3 text-sm text-[#93000a] break-words">
             {error}
             {unconfirmedTxHash && (
               <a
@@ -1843,7 +1797,7 @@ export default function CreateMemorial() {
 
         {/* ── WIZARD STEP 0: Basic Info ── */}
         {step === 0 && (
-          <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-8">
+          <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-6 md:p-8 space-y-8">
             {/* Photo drop zone */}
             <div>
               <label className={labelBase}>Pet Portrait</label>
@@ -1878,16 +1832,34 @@ export default function CreateMemorial() {
                 }}
               />
 
-              {previewUrl ? (
+              {photo ? (
                 <div className="space-y-3 animate-fadeIn">
                   <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
-                    <img
-                      key={imgRetryTick}
-                      src={previewUrl}
-                      alt={photo?.name || 'Pet Portrait'}
-                      className="w-full h-full object-cover"
-                      onError={handleImageError}
-                    />
+                    {previewUrl && !previewFailed ? (
+                      <img
+                        key={`photo-preview-${previewKey}`}
+                        src={previewUrl}
+                        alt={photo?.name || 'Pet Portrait'}
+                        className="w-full h-full object-cover"
+                        onError={handleImageError}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center text-center px-6">
+                        {previewFailed ? (
+                          <>
+                            <span className="material-symbols-outlined text-4xl text-[#d8c2ba] mb-2">pets</span>
+                            <span className="text-[15px] text-[#53433e]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                              Portrait Selected &amp; Ready
+                            </span>
+                            <span className="text-xs text-[#85736d] mt-1">
+                              Your browser cannot preview this format, but your photo will be preserved on-chain
+                            </span>
+                          </>
+                        ) : (
+                          <span className="inline-block w-5 h-5 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
+                        )}
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1895,8 +1867,9 @@ export default function CreateMemorial() {
                         e.stopPropagation();
                         handleRemoveImage();
                       }}
-                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1.5 transition-colors flex items-center justify-center w-7 h-7 text-xs cursor-pointer"
+                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full transition-colors flex items-center justify-center w-9 h-9 text-sm cursor-pointer touch-manipulation"
                       title="Remove photo"
+                      aria-label="Remove photo"
                     >
                       ✕
                     </button>
@@ -1966,27 +1939,6 @@ export default function CreateMemorial() {
                     </div>
                   )}
                 </div>
-              ) : isProcessingPhoto ? (
-                <div className="w-full h-40 rounded-2xl border border-[#d8c2ba]/50 bg-[#fdfbf9] p-6 flex flex-col items-center justify-center space-y-3.5 animate-fadeIn">
-                  <div className="flex items-center gap-3">
-                    <span className="inline-block w-4 h-4 border-2 border-[#8a4f36] border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm font-medium text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
-                      Preparing Pet Portrait…
-                    </span>
-                  </div>
-                  <div className="w-full max-w-xs space-y-1.5">
-                    <div className="w-full h-2 bg-[#ebdcd1]/50 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-[#8a4f36] rounded-full transition-all duration-300 ease-out"
-                        style={{ width: `${Math.max(10, photoProgress)}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[11px] text-[#85736d]">
-                      <span>{photoProgress < 50 ? 'Reading image…' : photoProgress < 90 ? 'Optimizing preview…' : 'Finalizing…'}</span>
-                      <span className="font-mono font-medium">{photoProgress}%</span>
-                    </div>
-                  </div>
-                </div>
               ) : (
                 <label
                   htmlFor="photo-input"
@@ -2036,7 +1988,7 @@ export default function CreateMemorial() {
 
         {/* ── WIZARD STEP 1: Story ── */}
         {step === 1 && (
-          <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-8 space-y-8">
+          <div className="bg-white rounded-2xl border border-[#d8c2ba]/30 p-6 md:p-8 space-y-8">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div>
                 <label className={labelBase}>Birth Date</label>
@@ -2135,12 +2087,19 @@ export default function CreateMemorial() {
               <div className="flex flex-col md:flex-row items-center md:items-center gap-6 md:gap-8 pt-1">
                 {/* Left (or Top on mobile): Vertical 4:5 Memorial Arch Preview */}
                 <div className="w-36 h-44 md:w-40 md:h-48 rounded-t-full rounded-b-2xl overflow-hidden border-2 border-amber-500/30 shadow-md shrink-0 bg-[#f5f3f0] flex items-center justify-center">
-                  {previewUrl ? (
+                  {photo && previewUrl && !previewFailed ? (
                     <img
+                      key={`arch-preview-${previewKey}`}
                       src={previewUrl}
                       alt={photo?.name || 'Pet Portrait'}
                       className="w-full h-full object-cover"
+                      onError={handleImageError}
                     />
+                  ) : photo ? (
+                    <div className="flex flex-col items-center justify-center text-[#85736d] p-4 text-center">
+                      <span className="material-symbols-outlined text-3xl text-[#d8c2ba] mb-1">pets</span>
+                      <span className="text-[11px]">Portrait Selected &amp; Ready</span>
+                    </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center text-[#85736d] p-4 text-center">
                       <span className="material-symbols-outlined text-3xl text-[#d8c2ba] mb-1">pets</span>
@@ -2299,7 +2258,7 @@ export default function CreateMemorial() {
                 <button
                   type="submit"
                   disabled={isSubmitting || !petName.trim() || isInsufficientFunds || isCreationPaused || !isFeeKnown}
-                  className="w-full flex items-center justify-center gap-2.5 bg-[#c27357] hover:bg-[#8a4f36] text-white px-7 py-3.5 rounded-2xl text-xs sm:text-sm font-semibold tracking-wider uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs whitespace-nowrap"
+                  className="w-full min-h-[48px] flex items-center justify-center gap-2.5 bg-[#c27357] hover:bg-[#8a4f36] text-white px-4 sm:px-7 py-3.5 rounded-2xl text-xs sm:text-sm font-semibold tracking-wider uppercase text-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs whitespace-normal sm:whitespace-nowrap touch-manipulation"
                 >
                   {isCreationPaused ? (
                     <span>Memorial Creation Paused</span>
@@ -2326,7 +2285,7 @@ export default function CreateMemorial() {
                 className="w-full flex items-center justify-center gap-3 bg-[#c27357] text-white py-4 rounded-2xl text-sm font-semibold tracking-wider uppercase opacity-60 cursor-not-allowed"
               >
                 <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>{isConfirming || txHash ? 'Confirming on-chain…' : 'Minting…'}</span>
+                <span>{isVerifyingMint ? 'Checking the blockchain…' : isConfirming || txHash ? 'Confirming on-chain…' : 'Minting…'}</span>
               </button>
             </div>
           )

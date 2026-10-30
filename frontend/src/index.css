@@ -126,6 +126,10 @@
     font-weight: var(--text-body-md--font-weight);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* No accidental horizontal panning on narrow (360px) phones. Propagates to the viewport,
+       so it does not turn <body> into a scroll container. */
+    overflow-x: hidden;
+    -webkit-tap-highlight-color: transparent;
   }
 }
 

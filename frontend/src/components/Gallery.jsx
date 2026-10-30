@@ -296,7 +296,8 @@ export default function Gallery() {
                       setSearchQuery('');
                       setVisibleCount(12);
                     }}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#85736d] hover:text-[#1b1c1a] p-1 rounded-full text-xs transition-colors"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-[#85736d] hover:text-[#1b1c1a] rounded-full text-xs transition-colors touch-manipulation"
+                    aria-label="Clear search"
                   >
                     ✕
                   </button>

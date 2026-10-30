@@ -270,9 +270,34 @@ export function resolveActivePrivyWallet(wallets, activeAddress) {
 }
 
 /**
- * Sends a smart contract write transaction reliably across both Privy Embedded Wallets (email login)
- * and external wallets (MetaMask / WalletConnect), even immediately after a page reload (F5) when
- * wagmi's internal connector may still be disconnected while `useWallets()` already holds the wallet.
+ * True only for wagmi's "connector is not attached yet" family of errors (typical right after F5),
+ * NOT for generic wallet / RPC failures (those must never trigger a second signing attempt).
+ */
+export function isConnectorNotConnectedError(err) {
+  let current = err;
+  for (let depth = 0; current && depth < 6; depth += 1) {
+    const name = current?.name || '';
+    if (name === 'ConnectorNotConnectedError' || name === 'ConnectorAccountNotFoundError' || name === 'ConnectorUnavailableReconnectingError') {
+      return true;
+    }
+    const text = `${current?.shortMessage || ''} ${current?.message || ''}`;
+    if (/connector not connected|connector account not found|connector .* unavailable while reconnecting/i.test(text)) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * Sends a smart contract write transaction with a strict, wallet-type-specific route:
+ *
+ * - Privy Embedded Wallet (email login, `walletClientType === 'privy'`):
+ *   direct `getEthereumProvider()` + viem `walletClient` (works even before wagmi re-attaches after F5).
+ * - External wallets (MetaMask, WalletConnect, Coinbase, ...):
+ *   the standard wagmi `writeContractAsync`, WITHOUT gas overrides from the public RPC so the wallet
+ *   prices the tx itself (hard-coded fees make mobile MetaMask over WalletConnect fail with -32603).
+ *   The direct provider is used only as a last resort when wagmi reports its connector is not attached.
  */
 export async function sendContractWithPrivyFallback({
   writeContractAsync,
@@ -287,7 +312,14 @@ export async function sendContractWithPrivyFallback({
     privyWallet?.address && typeof privyWallet.getEthereumProvider === 'function'
   );
 
-  const executeViaPrivyProvider = async (wallet) => {
+  const {
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    chainId: _ignoredChainId,
+    ...baseParams
+  } = txParams;
+
+  const executeViaPrivyProvider = async (wallet, { withGasOverrides }) => {
     const walletChainId = parseNumericChainId(wallet.chainId);
     if (walletChainId !== null && walletChainId !== baseSepolia.id && typeof wallet.switchChain === 'function') {
       await wallet.switchChain(baseSepolia.id);
@@ -299,39 +331,36 @@ export async function sendContractWithPrivyFallback({
       transport: custom(provider),
     });
     return await walletClient.writeContract({
-      address: txParams.address,
-      abi: txParams.abi,
-      functionName: txParams.functionName,
-      args: txParams.args,
-      ...(txParams.value !== undefined ? { value: txParams.value } : {}),
-      ...(txParams.maxFeePerGas !== undefined ? { maxFeePerGas: txParams.maxFeePerGas } : {}),
-      ...(txParams.maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas: txParams.maxPriorityFeePerGas } : {}),
+      address: baseParams.address,
+      abi: baseParams.abi,
+      functionName: baseParams.functionName,
+      args: baseParams.args,
+      ...(baseParams.value !== undefined ? { value: baseParams.value } : {}),
+      ...(withGasOverrides && maxFeePerGas !== undefined ? { maxFeePerGas } : {}),
+      ...(withGasOverrides && maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas } : {}),
       chain: baseSepolia,
       account: wallet.address,
     });
   };
 
-  // Primary path for Privy Embedded Wallet (or when wagmi's connector is not yet attached after F5)
-  if (canUseDirectProvider && (isPrivyEmbedded || !connector)) {
-    return await executeViaPrivyProvider(privyWallet);
+  // 1. Privy Embedded Wallet: always the direct EIP-1193 provider route
+  if (isPrivyEmbedded && canUseDirectProvider) {
+    return await executeViaPrivyProvider(privyWallet, { withGasOverrides: true });
   }
 
+  // 2. External wallet: standard wagmi route, the wallet estimates gas & fees itself
   try {
     return await writeContractAsync({
-      ...txParams,
-      account: activeAddress,
+      ...baseParams,
+      account: privyWallet?.address || activeAddress,
       ...(connector ? { connector } : {}),
       chainId: baseSepolia.id,
     });
   } catch (err) {
-    const errText = `${err?.name || ''} ${err?.shortMessage || ''} ${err?.message || ''}`;
-    const isConnectorNotConnected =
-      err?.name === 'ConnectorNotConnectedError' ||
-      /connector not connected|not connected|no account|account not found/i.test(errText);
-
-    if (isConnectorNotConnected && canUseDirectProvider) {
-      console.warn('[WalletTx] wagmi connector not connected after reload, falling back to direct Privy EIP-1193 provider.');
-      return await executeViaPrivyProvider(privyWallet);
+    // 3. Last resort: wagmi's connector is not attached yet (e.g. right after F5)
+    if (isConnectorNotConnectedError(err) && canUseDirectProvider) {
+      console.warn('[WalletTx] wagmi connector not attached yet, falling back to the wallet EIP-1193 provider.');
+      return await executeViaPrivyProvider(privyWallet, { withGasOverrides: false });
     }
     throw err;
   }

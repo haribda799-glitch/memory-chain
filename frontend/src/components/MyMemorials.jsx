@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useState, useMemo, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { 
   useReadContract,
@@ -16,6 +16,7 @@ import { useMemorials } from '../utils/useMemorials';
 import { CONTRACT_ABI } from '../config/contract';
 import { getContractAddress } from '../config/chains';
 import { useNow } from '../hooks/useNow';
+import { formatTxError } from '../utils/txErrors';
 import {
   isMobileWithoutEthereum,
   getMetaMaskDappDeepLink,
@@ -61,6 +62,8 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
   const activeAddress = wagmiAddress || embeddedWallet?.address || user?.wallet?.address || wallets[0]?.address;
 
   const [isToggling, setIsToggling] = useState(false);
+  // Synchronous lock: a fast double tap on a phone must never send two toggle_public transactions
+  const toggleLockRef = useRef(false);
   // Strict boolean normalization — guards against 0n, undefined, null from contract
   const [localIsPublic, setLocalIsPublic] = useState(() => Boolean(mem.isPublic));
 
@@ -94,12 +97,14 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
   const { writeContractAsync } = useWriteContract();
 
   const handleTogglePublic = async () => {
+    if (toggleLockRef.current) return;
     const isAuthorized = Boolean(activeAddress) || Boolean(wagmiAddress) || (ready && authenticated);
     if (!isAuthorized || !activeAddress) {
       alert("Please connect your wallet first.");
       return;
     }
 
+    toggleLockRef.current = true;
     setIsToggling(true);
     setTxInProgress(true);
     try {
@@ -125,7 +130,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
           }
         } catch (switchErr) {
           console.error('Failed to switch network:', switchErr);
-          alert('Please switch to Base Sepolia in your wallet.');
+          alert(formatTxError(switchErr, 'Please switch to Base Sepolia in your wallet.'));
           return;
         }
       }
@@ -156,12 +161,15 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
 
       console.log(`[toggle_public] Tx submitted: ${hash}. Awaiting receipt...`);
       if (publicClient && hash) {
-        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 180_000 });
         console.log(`[toggle_public] Tx confirmed on-chain. Status: ${receipt.status}`);
+        if (receipt.status !== 'success') {
+          throw new Error('Transaction reverted');
+        }
       }
 
       // 1. Compute the new value with strict boolean normalization
-      const nextVal = !Boolean(localIsPublic);
+      const nextVal = !localIsPublic;
       console.log(`[toggle_public] Optimistic update: isPublic ${localIsPublic} → ${nextVal}`);
 
       // 2. Immediately toggle local state so button & badge switch on the fly
@@ -187,11 +195,11 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
       }
     } catch (err) {
       console.error('Failed to toggle visibility:', err);
-      const reason = err?.shortMessage || err?.metaMessages?.[0] || err?.message || 'Transaction failed';
-      alert(`Failed to update visibility:\n${reason}`);
+      alert(`Failed to update visibility: ${formatTxError(err, 'Transaction failed. Please try again.')}`);
     } finally {
       setTxInProgress(false);
       setIsToggling(false);
+      toggleLockRef.current = false;
     }
   };
 

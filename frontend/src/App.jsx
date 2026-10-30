@@ -12,7 +12,7 @@ export default function App() {
   return (
     <HashRouter>
       <ScrollToTop />
-      <div className="bg-background text-on-surface font-body-md antialiased min-h-screen flex flex-col">
+      <div className="bg-background text-on-surface font-body-md antialiased min-h-screen flex flex-col overflow-x-clip">
         <Header />
         <main className="flex-grow">
           <ErrorBoundary>
