@@ -19,6 +19,15 @@ import {
   sendContractWithPrivyFallback,
 } from '../utils/mobileWallet';
 import { findMintedMemorial, waitForMintedMemorial, isAmbiguousSendError } from '../utils/mintRecovery';
+import {
+  sleep,
+  releaseCanvas,
+  loadImageElement,
+  disposeImageElement,
+  createAiInputCanvas,
+  preparePhotoSequentially,
+  PhotoPipelineCancelled,
+} from '../utils/photoPipeline';
 import ShareModal from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
@@ -37,7 +46,8 @@ const AI_CHECK_COLD_TIMEOUT_MS = 15000;       // 15s timeout for cold start whil
 const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once models are cached
 
 const AI_INPUT_MAX_DIM = 512;                 // px, photos are downscaled before TF.js to keep GPU memory tiny
-const TAB_WAKEUP_DELAY_MS = 180;              // 150-200ms pause after rAF so Android Chrome restores GPU/Canvas/WebGL context after Photo Picker
+const PREP_AI_WAIT_COLD_MS = 6000;            // Max time the "Preparing portrait" screen waits for the 1st (cold) AI check
+const PREP_AI_WAIT_WARM_MS = 3500;            // ...and for a warm AI check; slower checks finish in the background
 const RETRY_DELAY_MS = 350;                   // 350ms delay before automatic silent retry of image decode / AI check
 
 /* ── On-chain / validation constants ───────────────────────── */
@@ -127,243 +137,73 @@ function validateStoryFields({ birthDate, memorialDate, birthYear, passingYear }
 }
 
 /**
- * Normalize a FileReader Data URL when Android Photo Picker / content:// providers
- * supply an empty MIME type (`data:;base64,...` or `data:application/octet-stream;base64,...`).
- */
-function normalizeImageDataUrl(dataUrl, file) {
-  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return '';
-  if (dataUrl.startsWith('data:image/')) return dataUrl;
-  const commaIdx = dataUrl.indexOf(',');
-  if (commaIdx === -1) return dataUrl;
-  const header = dataUrl.slice(0, commaIdx);
-  if (!header.includes(';base64')) return dataUrl;
-  const name = (file?.name || '').toLowerCase();
-  let mime = 'image/jpeg';
-  if (name.endsWith('.png')) mime = 'image/png';
-  else if (name.endsWith('.webp')) mime = 'image/webp';
-  else if (name.endsWith('.gif')) mime = 'image/gif';
-  else if (name.endsWith('.bmp')) mime = 'image/bmp';
-  else if (name.endsWith('.heic')) mime = 'image/heic';
-  else if (name.endsWith('.heif')) mime = 'image/heif';
-  return `data:${mime};base64,${dataUrl.slice(commaIdx + 1)}`;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Waits for requestAnimationFrame + a short pause (150-200ms) so mobile Chrome
- * finishes waking up its graphics/Canvas/WebGL context after returning from the system Photo Picker.
- */
-function waitForTabWakeup(delayMs = TAB_WAKEUP_DELAY_MS) {
-  return new Promise((resolve) => {
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        setTimeout(resolve, delayMs);
-      };
-      const rafFallback = setTimeout(done, 120);
-      window.requestAnimationFrame(() => {
-        clearTimeout(rafFallback);
-        done();
-      });
-    } else {
-      setTimeout(resolve, delayMs);
-    }
-  });
-}
-
-function readFileAsDataUrlOnce(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const normalized = normalizeImageDataUrl(reader.result, file);
-      if (normalized && normalized.startsWith('data:image/')) {
-        resolve(normalized);
-      } else {
-        reject(new Error('FileReader returned empty or non-image Data URL'));
-      }
-    };
-    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
-    reader.readAsDataURL(file);
-  });
-}
-
-/**
- * Reads a File into a normalized `data:image/...` URL via FileReader,
- * automatically retrying after 350ms if the first read fails while Android wakes up.
- */
-async function readFileAsDataUrlWithRetry(file) {
-  try {
-    return await readFileAsDataUrlOnce(file);
-  } catch (err1) {
-    console.warn('[CreateMemorial] FileReader 1st attempt failed, retrying after 350ms:', err1?.message || err1);
-    await sleep(RETRY_DELAY_MS);
-    return await readFileAsDataUrlOnce(file);
-  }
-}
-
-/**
- * Decodes the selected photo into a SMALL canvas (longest side AI_INPUT_MAX_DIM) for TF.js.
- * Feeding a full 12-50 MP phone photo to TF.js allocates huge WebGL textures, which is the main
- * trigger of WebGL context loss on Android Chrome. Prefers createImageBitmap(file) (no URL needed),
- * falls back to an <img> decoding a fresh object URL. Never throws a cached failure: every call is fresh.
- */
-async function createAiInputCanvas(file) {
-  let source = null;
-  let width = 0;
-  let height = 0;
-  let cleanup = () => {};
-
-  if (typeof createImageBitmap === 'function') {
-    try {
-      const bitmap = await createImageBitmap(file);
-      source = bitmap;
-      width = bitmap.width;
-      height = bitmap.height;
-      cleanup = () => bitmap.close?.();
-    } catch {
-      // fall back to <img>
-    }
-  }
-
-  if (!source) {
-    const url = URL.createObjectURL(file);
-    try {
-      const img = await new Promise((resolve, reject) => {
-        const candidate = new Image();
-        const timer = setTimeout(() => reject(new Error('Timed out decoding image for AI analysis')), 8000);
-        candidate.onload = () => { clearTimeout(timer); resolve(candidate); };
-        candidate.onerror = () => { clearTimeout(timer); reject(new Error('Failed to decode image for AI analysis')); };
-        candidate.src = url;
-      });
-      source = img;
-      width = img.naturalWidth || img.width;
-      height = img.naturalHeight || img.height;
-      cleanup = () => {
-        img.onload = null;
-        img.onerror = null;
-        img.src = '';
-        URL.revokeObjectURL(url);
-      };
-    } catch (err) {
-      URL.revokeObjectURL(url);
-      throw err;
-    }
-  }
-
-  try {
-    if (!width || !height) throw new Error('Invalid image dimensions');
-    const scale = Math.min(1, AI_INPUT_MAX_DIM / Math.max(width, height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Canvas 2D context unavailable');
-    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-    return canvas;
-  } finally {
-    cleanup();
-  }
-}
-
-/**
- * Downscale a photo via Canvas (max 1000px, JPEG 0.8) for Arweave payload.
- * Runs right before upload so it never blocks the UI or exhausts phone memory during form editing.
+ * Downscale a photo via Canvas (max 1000px, JPEG 0.8) for the Arweave payload, right before upload.
+ * The selected photo is normally already a prepared <=1000px JPEG (see utils/photoPipeline.js), so this
+ * is usually a no-op. Canvas / bitmap / object URL memory is always released in `finally`.
  * Falls back to the original file on any failure and never throws.
  */
 async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX_IMAGE_DIMENSION, quality = COMPRESSION_QUALITY) {
+  if (!file || file.type === 'image/gif') return file;
+  const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || ''));
+  if (!isImage) return file;
+  // Small files under 1.5 MB don't require downscaling
+  if (file.size <= 1.5 * 1024 * 1024) return file;
+
+  let bitmap = null;
+  let img = null;
+  let objectUrl = '';
+  let canvas = null;
   try {
-    if (!file || file.type === 'image/gif') return file;
-    const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || ''));
-    if (!isImage) return file;
-
-    // Small files under 1.5 MB don't require downscaling
-    if (file.size <= 1.5 * 1024 * 1024) return file;
-
     let source = null;
     let width = 0;
     let height = 0;
-    let cleanup = () => {};
 
-    // 1. Try createImageBitmap with hardware downsampling to avoid full 50MP RAM explosion
+    // 1. createImageBitmap with hardware downsampling avoids a full 50 MP RAM explosion
     if (typeof createImageBitmap === 'function') {
       try {
-        const bitmap = await createImageBitmap(file, {
-          resizeWidth: maxWidth,
-          resizeQuality: 'medium',
-        });
+        bitmap = await createImageBitmap(file, { resizeWidth: maxWidth, resizeQuality: 'medium' });
         source = bitmap;
         width = bitmap.width;
         height = bitmap.height;
-        cleanup = () => bitmap.close?.();
       } catch {
-        // Fall back to Image
+        bitmap = null; // fall back to <img>
       }
     }
 
-    // 2. Fall back to Image via lightweight ObjectURL
+    // 2. <img> via an object URL of the in-memory file
     if (!source) {
-      const url = URL.createObjectURL(file);
-      try {
-        const img = new Image();
-        await new Promise((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = () => reject(new Error('decode failed'));
-          img.src = url;
-        });
-        source = img;
-        width = img.naturalWidth;
-        height = img.naturalHeight;
-        cleanup = () => {
-          URL.revokeObjectURL(url);
-          img.onload = null;
-          img.onerror = null;
-          img.src = '';
-        };
-      } catch (err) {
-        URL.revokeObjectURL(url);
-        throw err;
-      }
+      objectUrl = URL.createObjectURL(file);
+      img = await loadImageElement(objectUrl);
+      source = img;
+      width = img.naturalWidth;
+      height = img.naturalHeight;
     }
 
-    if (!width || !height) {
-      cleanup();
-      return file;
-    }
-
+    if (!width || !height) return file;
     const scale = Math.min(1, maxWidth / width, maxHeight / height);
-    if (scale >= 1 && file.size <= 2 * 1024 * 1024) {
-      cleanup();
-      return file;
-    }
+    if (scale >= 1 && file.size <= 2 * 1024 * 1024) return file;
 
-    const canvas = document.createElement('canvas');
+    canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(width * scale));
     canvas.height = Math.max(1, Math.round(height * scale));
     const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      cleanup();
-      return file;
-    }
+    if (!ctx) return file;
     ctx.fillStyle = '#ffffff'; // JPEG has no alpha — avoid black backgrounds for PNGs
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-    cleanup(); // Safely called AFTER drawImage
 
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
-    canvas.width = 0;
-    canvas.height = 0;
     if (!blob || blob.size >= file.size) return file;
-
-    const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
-    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+    const name = (file.name || 'photo').replace(/\.[^.]+$/, '');
+    return new File([blob], `${name}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
   } catch (err) {
     console.warn('[CreateMemorial] Image compression skipped, using original file fallback:', err?.message || err);
     return file;
+  } finally {
+    releaseCanvas(canvas);
+    bitmap?.close?.();
+    disposeImageElement(img);
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
   }
 }
 
@@ -477,6 +317,42 @@ async function getActiveTfBackend() {
   }
 }
 
+/*
+ * TF.js inference is serialized (never two photo checks at once), so each run can own a TF engine scope:
+ * every intermediate tensor created during the run is disposed by endScope(), even if a model leaks it
+ * (model weights were created before the scope and are kept). The wait for a previous, possibly hung
+ * run (dead WebGL context) is bounded so it can never deadlock the next photo.
+ */
+const AI_QUEUE_MAX_WAIT_MS = 8000;
+let aiInferenceQueue = Promise.resolve();
+function runSerializedInference(task) {
+  const previous = aiInferenceQueue;
+  const run = (async () => {
+    await Promise.race([previous, sleep(AI_QUEUE_MAX_WAIT_MS)]);
+    return task();
+  })();
+  aiInferenceQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function withTfScope(fn) {
+  const tf = await ensureTfReady();
+  const engine = tf.engine();
+  const tensorsBefore = tf.memory().numTensors;
+  engine.startScope();
+  try {
+    return await fn(tf);
+  } finally {
+    try {
+      engine.endScope();
+    } catch (scopeErr) {
+      console.warn('[AI Analysis] TF scope cleanup note:', scopeErr?.message || scopeErr);
+    }
+    const leaked = tf.memory().numTensors - tensorsBefore;
+    if (leaked > 0) console.warn(`[AI Analysis] ${leaked} tensor(s) still allocated after the photo check.`);
+  }
+}
+
 export default function CreateMemorial() {
   const { ready, authenticated, connectWallet, login, user } = usePrivy();
   const { wallets } = useWallets();
@@ -535,73 +411,44 @@ export default function CreateMemorial() {
   // Tracking in-flight AI analysis runs to discard obsolete analysis results
   const analysisRunIdRef = useRef(0);
 
-  // Dedicated file input ref for reliable reset across repeated creations
-  const fileInputRef = useRef(null);
-
   /*
-   * Photo preview model (identical rendering on Step 1 and Step 3):
-   *   1. A fresh `URL.createObjectURL(file)` is rendered immediately — no canvas / resize / AI step can
-   *      ever replace the <img> with a placeholder.
-   *   2. Only if the <img> element itself fires onError: retry with a NEW object URL (Android Chrome may
-   *      fail the very first frame after returning from the Photo Picker), then with a FileReader data URL.
-   *   3. The "Portrait Selected & Ready" placeholder appears only when ALL sources failed in the <img>
-   *      (e.g. HEIC on a browser without HEIC support). Removing / re-selecting resets everything and
-   *      bumps `previewKey` so React mounts a brand-new <img>.
+   * Photo model (identical rendering on Step 1 and Step 3):
+   *   - Selecting a photo freezes the portrait card (`isPreparingPhoto`) while a STRICTLY SEQUENTIAL
+   *     pipeline runs: wake-up pause -> single arrayBuffer read -> data URL -> canvas JPEG -> AI check.
+   *   - Only then is the finished in-memory `data:image/jpeg;base64,...` written to `previewUrl` and the
+   *     <img> rendered, so it never races the background work.
+   *   - The <input type="file"> is remounted (`inputKey`) after the picker file was copied into RAM and on
+   *     every removal, so Android Chrome drops its cached Photo Picker handle for that file.
+   *   - "Portrait Selected & Ready" is shown only when the browser genuinely cannot decode the format.
    */
+  const [isPreparingPhoto, setIsPreparingPhoto] = useState(false);
+  const [inputKey, setInputKey] = useState(0);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
-  const previewAttemptRef = useRef(0); // 0 = objectUrl, 1 = fresh objectUrl, 2 = dataUrl
-  const previewRecoveringRef = useRef(false);
-  const objectUrlsRef = useRef(new Set());
-
-  const registerObjectUrl = useCallback((url) => {
-    if (typeof url === 'string' && url.startsWith('blob:')) {
-      objectUrlsRef.current.add(url);
-    }
-  }, []);
-
-  const revokeTrackedObjectUrls = useCallback((keepUrl = '') => {
-    for (const url of objectUrlsRef.current) {
-      if (url !== keepUrl) {
-        try {
-          URL.revokeObjectURL(url);
-        } catch {
-          // ignore
-        }
-        objectUrlsRef.current.delete(url);
-      }
-    }
-  }, []);
+  const preparingLockRef = useRef(false);
+  const previewRetryRef = useRef(0);
 
   // Immediate background warmup of AI models on component mount
   useEffect(() => {
     preloadAiModels();
   }, []);
 
-  // Ensure file input has no stale browser-restored value on initial mount only
-  // (never clear input.value while a file selection is being read on Android Chrome!)
-  useEffect(() => {
-    if (fileInputRef.current) {
-      try {
-        fileInputRef.current.value = '';
-      } catch {}
-    }
-  }, []);
-
+  // Cancel any in-flight photo preparation / AI check on unmount
   useEffect(() => {
     return () => {
-      revokeTrackedObjectUrls();
+      analysisRunIdRef.current += 1;
+      preparingLockRef.current = false;
       resetAiModeration();
     };
-  }, [revokeTrackedObjectUrls]);
+  }, []);
 
-  /** Fully clears the photo, its preview sources, every preview error flag and the AI check state. */
+  /** Fully clears the photo, its preview, every preview error flag, the AI check state and the <input>. */
   const clearPhotoState = useCallback(() => {
-    analysisRunIdRef.current += 1;
-    revokeTrackedObjectUrls();
-    previewAttemptRef.current = 0;
-    previewRecoveringRef.current = false;
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    analysisRunIdRef.current += 1; // cancels any in-flight pipeline run
+    preparingLockRef.current = false;
+    previewRetryRef.current = 0;
+    setInputKey((k) => k + 1);
+    setIsPreparingPhoto(false);
     setPhoto(null);
     setPreviewUrl('');
     setPreviewFailed(false);
@@ -610,9 +457,10 @@ export default function CreateMemorial() {
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-  }, [revokeTrackedObjectUrls]);
+  }, []);
 
   const handleRemoveImage = useCallback(() => {
+    if (preparingLockRef.current) return; // the card is frozen while the photo is being prepared
     clearPhotoState();
     setError(null);
   }, [clearPhotoState]);
@@ -821,39 +669,44 @@ export default function CreateMemorial() {
     isFeeKnown && balance?.value !== undefined && balance.value < creationFee + GAS_BUFFER_WEI
   );
 
-  /* ── Non-blocking AI image check (BlazeFace + COCO-SSD) ── */
+  /* ── AI image check (BlazeFace + COCO-SSD), informational only ── */
 
-  // One inference pass on the CURRENT TF.js backend, on a small downscaled copy of the photo.
-  const runAiInference = useCallback(async (file) => {
+  // One inference pass on the CURRENT TF.js backend, on a small copy of the PREPARED (in-memory) JPEG.
+  // Serialized + wrapped in a TF engine scope; the input canvas is released in `finally`.
+  const runAiInference = useCallback((preparedDataUrl) => runSerializedInference(async () => {
     await ensureTfReady();
     const [faceModel, objectModel] = await Promise.all([
       getFaceModel(),
       getObjectModel(),
     ]);
-    const input = await createAiInputCanvas(file);
 
-    let faces = [];
-    let predictions = [];
-    let faceFailed = false;
-    let objectFailed = false;
+    const outcome = await withTfScope(async () => {
+      let input = null;
+      let faces = [];
+      let predictions = [];
+      let faceFailed = false;
+      let objectFailed = false;
+      try {
+        input = await createAiInputCanvas(preparedDataUrl, AI_INPUT_MAX_DIM);
+        try {
+          faces = await faceModel.estimateFaces(input, false);
+        } catch (faceErr) {
+          faceFailed = true;
+          console.warn('[AI Analysis] Face detection warning:', faceErr);
+        }
+        try {
+          predictions = await objectModel.detect(input);
+        } catch (objErr) {
+          objectFailed = true;
+          console.warn('[AI Analysis] Object detection warning:', objErr);
+        }
+      } finally {
+        releaseCanvas(input);
+      }
+      return { faces, predictions, faceFailed, objectFailed };
+    });
 
-    try {
-      faces = await faceModel.estimateFaces(input, false);
-    } catch (faceErr) {
-      faceFailed = true;
-      console.warn('[AI Analysis] Face detection warning:', faceErr);
-    }
-
-    try {
-      predictions = await objectModel.detect(input);
-    } catch (objErr) {
-      objectFailed = true;
-      console.warn('[AI Analysis] Object detection warning:', objErr);
-    } finally {
-      input.width = 0;
-      input.height = 0;
-    }
-
+    const { faces, predictions, faceFailed, objectFailed } = outcome;
     if (faceFailed && objectFailed) {
       throw new Error('Both AI models failed during inference (graphics context lost)');
     }
@@ -890,29 +743,30 @@ export default function CreateMemorial() {
       hasAnimal,
       detectedSpecies,
     };
-  }, []);
+  }), []);
 
   // Inference with an automatic WebGL -> CPU backend fallback (Android WebGL context loss after backgrounding)
-  const runAiCheck = useCallback(async (file) => {
+  const runAiCheck = useCallback(async (preparedDataUrl) => {
     try {
-      return await runAiInference(file);
+      return await runAiInference(preparedDataUrl);
     } catch (err) {
       const backend = await getActiveTfBackend();
       if (backend && backend !== 'cpu') {
         console.warn(`[AI Analysis] Inference failed on "${backend}" backend, retrying on CPU:`, err?.message || err);
         const switched = await switchTfToCpuBackend();
-        if (switched) return await runAiInference(file);
+        if (switched) return await runAiInference(preparedDataUrl);
       }
       throw err;
     }
   }, [runAiInference]);
 
-  /* Background AI verification pipeline: dynamic timeout (cold: 15s, warm: 5s). If the first attempt fails or
-   * hangs (typical for a lost WebGL context), TF.js is moved to the CPU backend and the check is retried once. */
-  const processSelectedImage = useCallback(async (file, runId) => {
+  /* AI verification with a dynamic timeout (cold: 15s, warm: 5s). If the first attempt fails or hangs
+   * (typical for a lost WebGL context), TF.js is moved to the CPU backend and the check is retried once.
+   * Resolves once `checkStatus` has been set (or the run became obsolete). */
+  const processSelectedImage = useCallback(async (preparedDataUrl, runId) => {
     const isCurrent = () => runId === analysisRunIdRef.current;
     const runWithTimeout = (timeoutMs) => Promise.race([
-      runAiCheck(file).catch((err) => {
+      runAiCheck(preparedDataUrl).catch((err) => {
         console.warn('[AI Analysis] Attempt failed:', err?.message || err);
         return null;
       }),
@@ -952,8 +806,14 @@ export default function CreateMemorial() {
     }
   }, [runAiCheck]);
 
+  /**
+   * Photo selection: freezes the portrait card and runs the strictly sequential pipeline
+   * (utils/photoPipeline.js steps A-D, then the AI check as step E). Step F unfreezes the card and renders
+   * the finished in-memory JPEG data URL.
+   */
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
+    if (preparingLockRef.current) return; // one photo at a time; the card is frozen meanwhile
     // Multiplatform image validation (Android, iOS HEIC, Desktop)
     const looksLikeImage = Boolean(
       file.type?.startsWith('image/') ||
@@ -962,114 +822,91 @@ export default function CreateMemorial() {
     );
     if (!looksLikeImage || file.size === 0) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      setInputKey((k) => k + 1);
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      setInputKey((k) => k + 1);
       return;
     }
+
     analysisRunIdRef.current += 1;
     const runId = analysisRunIdRef.current;
     const isCurrent = () => runId === analysisRunIdRef.current;
+    preparingLockRef.current = true;
+    previewRetryRef.current = 0;
+
+    // Freeze the portrait card: no <img> is rendered while the pipeline works
     setError(null);
-
-    // Fresh preview source for THIS selection: previous URLs revoked, every preview error flag reset,
-    // and a new <img> key so React mounts a brand-new element.
-    revokeTrackedObjectUrls();
-    previewAttemptRef.current = 0;
-    previewRecoveringRef.current = false;
-    let objectUrl = '';
-    try {
-      objectUrl = URL.createObjectURL(file);
-      registerObjectUrl(objectUrl);
-    } catch (urlErr) {
-      console.warn('[CreateMemorial] createObjectURL unavailable, using FileReader preview:', urlErr?.message || urlErr);
-    }
-
-    setPhoto(file);
+    setPhoto(null);
+    setPreviewUrl('');
     setPreviewFailed(false);
-    setPreviewKey((k) => k + 1);
+    setCheckStatus('idle');
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-    setCheckStatus('checking');
-
-    if (objectUrl) {
-      setPreviewUrl(objectUrl);
-    } else {
-      previewAttemptRef.current = 2;
-      setPreviewUrl('');
-      try {
-        const dataUrl = await readFileAsDataUrlWithRetry(file);
-        if (!isCurrent()) return;
-        setPreviewUrl(dataUrl);
-      } catch (readErr) {
-        console.warn('[CreateMemorial] FileReader preview failed:', readErr?.message || readErr);
-        if (!isCurrent()) return;
-        setPreviewFailed(true);
-      }
-    }
-
-    // Give Android Chrome a moment to restore its graphics context after the Photo Picker, then run the
-    // informational AI check in the background (it never touches the preview).
-    await waitForTabWakeup(TAB_WAKEUP_DELAY_MS);
-    if (!isCurrent()) return;
-    processSelectedImage(file, runId);
-  }, [processSelectedImage, registerObjectUrl, revokeTrackedObjectUrls]);
-
-  /**
-   * <img> onError recovery (Step 1 and Step 3 share it):
-   * object URL -> fresh object URL (after a wake-up pause) -> FileReader data URL -> placeholder.
-   */
-  const handleImageError = useCallback(async () => {
-    if (!photo || previewRecoveringRef.current) return;
-    const file = photo;
-    const runId = analysisRunIdRef.current;
-    const isCurrent = () => runId === analysisRunIdRef.current;
-    previewRecoveringRef.current = true;
+    setIsPreparingPhoto(true);
 
     try {
-      if (previewAttemptRef.current === 0) {
-        console.warn('[CreateMemorial] <img> preview error, retrying with a fresh object URL...');
-        await waitForTabWakeup(RETRY_DELAY_MS);
-        if (!isCurrent()) return;
-        previewAttemptRef.current = 1;
-        try {
-          const freshUrl = URL.createObjectURL(file);
-          registerObjectUrl(freshUrl);
-          setPreviewUrl(freshUrl);
-          setPreviewKey((k) => k + 1);
-          return;
-        } catch {
-          // fall through to the FileReader source
-        }
-      }
+      // Steps A-D (wake-up pause, single arrayBuffer read, data URL, canvas JPEG), one after another
+      const prepared = await preparePhotoSequentially(file, {
+        isCurrent,
+        maxDim: MAX_IMAGE_DIMENSION,
+        // The picker file is fully copied into RAM: remount <input> so Chrome drops its cached handle
+        onFileCopied: () => setInputKey((k) => k + 1),
+      });
+      if (!isCurrent()) return;
 
-      if (previewAttemptRef.current <= 1) {
-        console.warn('[CreateMemorial] <img> object URL failed again, retrying with a FileReader data URL...');
-        previewAttemptRef.current = 2;
-        try {
-          const dataUrl = await readFileAsDataUrlWithRetry(file);
-          if (!isCurrent()) return;
-          setPreviewUrl(dataUrl);
-          setPreviewKey((k) => k + 1);
-          return;
-        } catch (readErr) {
-          console.warn('[CreateMemorial] FileReader preview failed:', readErr?.message || readErr);
-        }
+      // Step E: AI check, only on the finished in-memory JPEG (the resize canvas is already released).
+      // The card waits a bounded time; a slower (cold) check keeps running and updates the badge later.
+      if (prepared.previewFailed) {
+        setCheckStatus('skipped');
+      } else {
+        setCheckStatus('checking');
+        const aiDone = processSelectedImage(prepared.previewUrl, runId);
+        await Promise.race([aiDone, sleep(isAiWarm ? PREP_AI_WAIT_WARM_MS : PREP_AI_WAIT_COLD_MS)]);
         if (!isCurrent()) return;
       }
 
-      // Every source failed inside <img> itself (e.g. HEIC without browser support): show the placeholder.
-      // The original file is still uploaded as-is.
-      console.warn('[CreateMemorial] Browser cannot render this photo format, showing placeholder.');
-      setPreviewFailed(true);
+      // Step F: unfreeze and render the prepared data URL
+      setPhoto(prepared.uploadFile);
+      setPreviewUrl(prepared.previewUrl);
+      setPreviewFailed(prepared.previewFailed);
+      setPreviewKey((k) => k + 1);
+    } catch (err) {
+      if (err instanceof PhotoPipelineCancelled || !isCurrent()) return;
+      console.warn('[CreateMemorial] Photo preparation failed:', err?.message || err);
+      setPhoto(null);
+      setPreviewUrl('');
+      setCheckStatus('idle');
+      setInputKey((k) => k + 1);
+      setError('We could not read this photo. Please select it again.');
     } finally {
-      if (isCurrent()) previewRecoveringRef.current = false;
+      if (isCurrent()) {
+        preparingLockRef.current = false;
+        setIsPreparingPhoto(false);
+      }
     }
-  }, [photo, registerObjectUrl]);
+  }, [processSelectedImage]);
+
+  /**
+   * <img> onError: the preview is a canvas-made JPEG data URL held in memory, so a failure is transient
+   * (memory pressure). Remount the <img> once after a short pause, then fall back to the placeholder.
+   */
+  const handleImageError = useCallback(async () => {
+    const runId = analysisRunIdRef.current;
+    if (previewRetryRef.current < 1) {
+      previewRetryRef.current += 1;
+      console.warn('[CreateMemorial] <img> preview error, remounting once...');
+      await sleep(RETRY_DELAY_MS);
+      if (runId !== analysisRunIdRef.current) return;
+      setPreviewKey((k) => k + 1);
+      return;
+    }
+    console.warn('[CreateMemorial] Browser cannot render this photo, showing placeholder.');
+    setPreviewFailed(true);
+  }, []);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -1803,7 +1640,7 @@ export default function CreateMemorial() {
               <label className={labelBase}>Pet Portrait</label>
               {/* File input accessible to iOS Safari and Android */}
               <input
-                ref={fileInputRef}
+                key={`photo-input-${inputKey}`}
                 id="photo-input"
                 type="file"
                 autoComplete="off"
@@ -1824,6 +1661,7 @@ export default function CreateMemorial() {
                   // Reset value on click so re-selecting the same photo always triggers onChange
                   e.currentTarget.value = '';
                 }}
+                disabled={isPreparingPhoto}
                 onChange={(e) => {
                   const selectedFile = e.target.files?.[0];
                   if (selectedFile) {
@@ -1832,7 +1670,22 @@ export default function CreateMemorial() {
                 }}
               />
 
-              {photo ? (
+              {isPreparingPhoto ? (
+                <div
+                  className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#fdfbf9] flex flex-col items-center justify-center text-center px-6 animate-fadeIn"
+                  role="status"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <span className="inline-block w-8 h-8 border-[3px] border-[#d48c6f] border-t-transparent rounded-full animate-spin mb-4" />
+                  <span className="text-[15px] text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
+                    Preparing portrait...
+                  </span>
+                  <span className="text-xs text-[#85736d] mt-1.5 max-w-xs leading-relaxed">
+                    Optimizing image &amp; initializing memory check — please wait a moment
+                  </span>
+                </div>
+              ) : photo ? (
                 <div className="space-y-3 animate-fadeIn">
                   <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#f5f3f0]">
                     {previewUrl && !previewFailed ? (
@@ -2230,6 +2083,7 @@ export default function CreateMemorial() {
               <button
                 type="button"
                 onClick={() => {
+                  if (isPreparingPhoto) return;
                   if (step === 0) {
                     const nameError = validatePetName(petName);
                     if (nameError) { setError(nameError); return; }
@@ -2247,7 +2101,7 @@ export default function CreateMemorial() {
                   setUnconfirmedTxHash(null);
                   setStep(s => s + 1);
                 }}
-                disabled={step === 0 && detectedPerson && !humanConsentGiven}
+                disabled={(step === 0 && detectedPerson && !humanConsentGiven) || isPreparingPhoto}
                 className="flex items-center justify-center gap-2 bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-3.5 rounded-2xl text-xs font-semibold tracking-widest uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs"
               >
                 <span>Continue</span>
