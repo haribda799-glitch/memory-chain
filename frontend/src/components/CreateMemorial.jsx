@@ -413,20 +413,31 @@ export default function CreateMemorial() {
 
   /*
    * Photo model (identical rendering on Step 1 and Step 3):
-   *   - Selecting a photo freezes the portrait card (`isPreparingPhoto`) while a STRICTLY SEQUENTIAL
-   *     pipeline runs: wake-up pause -> single arrayBuffer read -> data URL -> canvas JPEG -> AI check.
+   *   - Selecting a photo starts reading the File into RAM IMMEDIATELY at 0ms (before any sleep or DOM
+   *     unmount), then pauses 400ms while the portrait card shows a calm loading state (`isPreparingPhoto`),
+   *     resizes to a canvas JPEG, and runs the AI check.
    *   - Only then is the finished in-memory `data:image/jpeg;base64,...` written to `previewUrl` and the
    *     <img> rendered, so it never races the background work.
-   *   - The <input type="file"> is remounted (`inputKey`) after the picker file was copied into RAM and on
-   *     every removal, so Android Chrome drops its cached Photo Picker handle for that file.
+   *   - The <input type="file"> stays permanently mounted in the DOM (never remounted via `key`) so Android
+   *     Chrome and MetaMask WebView never revoke the active `content://` file descriptor mid-read.
    *   - "Portrait Selected & Ready" is shown only when the browser genuinely cannot decode the format.
    */
   const [isPreparingPhoto, setIsPreparingPhoto] = useState(false);
-  const [inputKey, setInputKey] = useState(0);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
+  const fileInputRef = useRef(null);
   const preparingLockRef = useRef(false);
   const previewRetryRef = useRef(0);
+
+  const resetFileInput = useCallback(() => {
+    if (fileInputRef.current) {
+      try {
+        fileInputRef.current.value = '';
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
 
   // Immediate background warmup of AI models on component mount
   useEffect(() => {
@@ -447,7 +458,7 @@ export default function CreateMemorial() {
     analysisRunIdRef.current += 1; // cancels any in-flight pipeline run
     preparingLockRef.current = false;
     previewRetryRef.current = 0;
-    setInputKey((k) => k + 1);
+    resetFileInput();
     setIsPreparingPhoto(false);
     setPhoto(null);
     setPreviewUrl('');
@@ -457,7 +468,7 @@ export default function CreateMemorial() {
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
-  }, []);
+  }, [resetFileInput]);
 
   const handleRemoveImage = useCallback(() => {
     if (preparingLockRef.current) return; // the card is frozen while the photo is being prepared
@@ -822,12 +833,12 @@ export default function CreateMemorial() {
     );
     if (!looksLikeImage || file.size === 0) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
-      setInputKey((k) => k + 1);
+      resetFileInput();
       return;
     }
     if (file.size > MAX_RAW_PHOTO_BYTES) {
       setError('Photo must be under 30 MB');
-      setInputKey((k) => k + 1);
+      resetFileInput();
       return;
     }
 
@@ -836,6 +847,12 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     preparingLockRef.current = true;
     previewRetryRef.current = 0;
+
+    // Start reading the file into RAM at 0ms BEFORE any React state updates or wakeup delay
+    const preparePromise = preparePhotoSequentially(file, {
+      isCurrent,
+      maxDim: MAX_IMAGE_DIMENSION,
+    });
 
     // Freeze the portrait card: no <img> is rendered while the pipeline works
     setError(null);
@@ -849,13 +866,8 @@ export default function CreateMemorial() {
     setIsPreparingPhoto(true);
 
     try {
-      // Steps A-D (wake-up pause, single arrayBuffer read, data URL, canvas JPEG), one after another
-      const prepared = await preparePhotoSequentially(file, {
-        isCurrent,
-        maxDim: MAX_IMAGE_DIMENSION,
-        // The picker file is fully copied into RAM: remount <input> so Chrome drops its cached handle
-        onFileCopied: () => setInputKey((k) => k + 1),
-      });
+      const prepared = await preparePromise;
+      resetFileInput();
       if (!isCurrent()) return;
 
       // Step E: AI check, only on the finished in-memory JPEG (the resize canvas is already released).
@@ -875,12 +887,12 @@ export default function CreateMemorial() {
       setPreviewFailed(prepared.previewFailed);
       setPreviewKey((k) => k + 1);
     } catch (err) {
+      resetFileInput();
       if (err instanceof PhotoPipelineCancelled || !isCurrent()) return;
       console.warn('[CreateMemorial] Photo preparation failed:', err?.message || err);
       setPhoto(null);
       setPreviewUrl('');
       setCheckStatus('idle');
-      setInputKey((k) => k + 1);
       setError('We could not read this photo. Please select it again.');
     } finally {
       if (isCurrent()) {
@@ -888,7 +900,7 @@ export default function CreateMemorial() {
         setIsPreparingPhoto(false);
       }
     }
-  }, [processSelectedImage]);
+  }, [processSelectedImage, resetFileInput]);
 
   /**
    * <img> onError: the preview is a canvas-made JPEG data URL held in memory, so a failure is transient
@@ -1638,9 +1650,9 @@ export default function CreateMemorial() {
             {/* Photo drop zone */}
             <div>
               <label className={labelBase}>Pet Portrait</label>
-              {/* File input accessible to iOS Safari and Android */}
+              {/* File input kept permanently mounted so Android never revokes the picked file handle */}
               <input
-                key={`photo-input-${inputKey}`}
+                ref={fileInputRef}
                 id="photo-input"
                 type="file"
                 autoComplete="off"
@@ -1661,7 +1673,6 @@ export default function CreateMemorial() {
                   // Reset value on click so re-selecting the same photo always triggers onChange
                   e.currentTarget.value = '';
                 }}
-                disabled={isPreparingPhoto}
                 onChange={(e) => {
                   const selectedFile = e.target.files?.[0];
                   if (selectedFile) {

@@ -2,14 +2,19 @@
 // Sequential photo preparation pipeline (Android Chrome safe)
 // ============================================================
 //
-// Why strictly sequential: on Android Chrome, re-selecting the SAME photo from the system Photo Picker
-// (a `content://` URI) while several consumers read the File in parallel (<img>, FileReader, canvas,
-// TF.js) can break the Blob stream, and Chrome keeps that broken handle cached for the URI until a
-// different file is picked. So the picker File is read EXACTLY ONCE into RAM (arrayBuffer -> Blob),
-// and every later step works on that in-memory copy only, one step at a time.
+// Why this exact order:
+// 1. On Android Chrome and MetaMask WebView, a picked `File` is backed by a temporary `content://`
+//    descriptor from the system Photo Picker. Waiting 400ms or unmounting `<input type="file">` BEFORE
+//    starting the read revokes that descriptor and triggers `NotReadableError`.
+// 2. Therefore, Step A starts reading the file into RAM IMMEDIATELY at 0ms (synchronously on the
+//    `onChange` tick) via `FileReader.readAsDataURL(file)` -> `file.arrayBuffer()` fallback, while also
+//    capturing an immediate `URL.createObjectURL(file)` fallback handle.
+// 3. Once the bytes are safely in RAM, Step B pauses 400ms (`PHOTO_WAKEUP_DELAY_MS`) so the mobile
+//    browser finishes resuming its GPU/Canvas/WebGL context after the Photo Picker closes, before any
+//    `new Image()`, `<canvas>`, or TF.js work runs.
 
-export const PHOTO_WAKEUP_DELAY_MS = 400;   // Step A: let Chrome fully resume after the Photo Picker closes
-export const DECODE_RETRY_DELAY_MS = 400;   // Pause before the single decode retry
+export const PHOTO_WAKEUP_DELAY_MS = 400;   // Step B: let Chrome/WebView GPU resume after bytes are in RAM
+export const DECODE_RETRY_DELAY_MS = 400;   // Pause before the decode fallback retry
 export const PREVIEW_JPEG_QUALITY = 0.88;
 
 /** Thrown when a newer selection / removal made the current pipeline run obsolete. */
@@ -59,23 +64,40 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-/** Step C: in-memory Blob -> normalized `data:image/...;base64` URL (FileReader, base64 fallback). */
+/**
+ * Initiates a direct `FileReader.readAsDataURL(file)` synchronously on the current tick.
+ * Most reliable primary reader for `content://` URIs in Android Chrome and in-app WebViews.
+ */
+export function readFileAsDataUrlDirect(file, mimeHint = guessImageMime(file)) {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === 'undefined' || !(file instanceof Blob)) {
+      reject(new Error('FileReader unavailable for this input'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const normalized = normalizeImageDataUrl(reader.result, mimeHint);
+      if (normalized) {
+        resolve(normalized);
+      } else {
+        reject(new Error('FileReader returned an empty data URL'));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** In-memory Blob -> normalized `data:image/...;base64` URL (FileReader with base64 fallback). */
 export async function readBlobAsDataUrl(blob, mimeHint = blob?.type || 'image/jpeg') {
-  if (typeof FileReader !== 'undefined') {
+  if (typeof FileReader !== 'undefined' && blob instanceof Blob) {
     try {
-      const raw = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
-        reader.readAsDataURL(blob);
-      });
-      const normalized = normalizeImageDataUrl(raw, mimeHint);
-      if (normalized) return normalized;
+      return await readFileAsDataUrlDirect(blob, mimeHint);
     } catch (err) {
-      console.warn('[PhotoPipeline] FileReader failed, using base64 fallback:', err?.message || err);
+      console.warn('[PhotoPipeline] FileReader failed on Blob, using base64 fallback:', err?.message || err);
     }
   }
-  // The Blob lives in RAM, so reading it again is safe (it is NOT the picker's content:// file)
+  // The Blob lives in RAM, so reading it via arrayBuffer is safe
   const base64 = arrayBufferToBase64(await blob.arrayBuffer());
   return `data:${mimeHint};base64,${base64}`;
 }
@@ -135,22 +157,52 @@ export function loadImageElement(src, timeoutMs = 10000) {
 }
 
 /**
- * Step D: decode the data URL (single retry with a fresh object URL of the in-memory Blob after 400ms),
- * draw it on a canvas (longest side <= maxDim) and export a clean JPEG. The canvas memory is released
- * in `finally`, on success AND on failure.
+ * Step C: decode the image from `rawDataUrl` (falling back to a fresh object URL of `memoryBlob`
+ * or `fallbackObjectUrl`), draw it on a canvas (longest side <= maxDim), and export a clean JPEG.
+ * The canvas memory is released in `finally`, on success AND on failure.
  */
-export async function renderToJpeg({ rawDataUrl, memoryBlob, maxDim, quality = PREVIEW_JPEG_QUALITY, retryDelayMs = DECODE_RETRY_DELAY_MS }) {
+export async function renderToJpeg({
+  rawDataUrl,
+  memoryBlob,
+  fallbackObjectUrl = '',
+  maxDim,
+  quality = PREVIEW_JPEG_QUALITY,
+  retryDelayMs = DECODE_RETRY_DELAY_MS,
+}) {
   let img = null;
   let objectUrl = '';
   let canvas = null;
   try {
-    try {
-      img = await loadImageElement(rawDataUrl);
-    } catch (firstErr) {
-      console.warn('[PhotoPipeline] 1st decode failed, retrying with a fresh object URL:', firstErr?.message || firstErr);
-      await sleep(retryDelayMs);
-      objectUrl = URL.createObjectURL(memoryBlob);
-      img = await loadImageElement(objectUrl);
+    let lastDecodeErr = null;
+    if (rawDataUrl) {
+      try {
+        img = await loadImageElement(rawDataUrl);
+      } catch (firstErr) {
+        lastDecodeErr = firstErr;
+        console.warn('[PhotoPipeline] 1st decode failed, retrying via object URL:', firstErr?.message || firstErr);
+        if (retryDelayMs > 0) await sleep(retryDelayMs);
+      }
+    }
+
+    if (!img && memoryBlob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      try {
+        objectUrl = URL.createObjectURL(memoryBlob);
+        img = await loadImageElement(objectUrl);
+      } catch (blobErr) {
+        lastDecodeErr = blobErr;
+      }
+    }
+
+    if (!img && fallbackObjectUrl) {
+      try {
+        img = await loadImageElement(fallbackObjectUrl);
+      } catch (fallbackErr) {
+        lastDecodeErr = fallbackErr;
+      }
+    }
+
+    if (!img) {
+      throw lastDecodeErr || new Error('Image decode failed');
     }
 
     const width = img.naturalWidth || img.width;
@@ -175,7 +227,13 @@ export async function renderToJpeg({ rawDataUrl, memoryBlob, maxDim, quality = P
   } finally {
     releaseCanvas(canvas);
     disposeImageElement(img);
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (objectUrl) {
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        // ignore
+      }
+    }
   }
 }
 
@@ -212,16 +270,17 @@ function baseName(file) {
 }
 
 /**
- * Steps A-D, strictly one after another (no parallel access to the picker File):
- *   A. wait for Chrome to resume after the Photo Picker
- *   B. read the picker File EXACTLY ONCE into RAM (`file.arrayBuffer()`) -> independent in-memory Blob
- *   C. in-memory Blob -> base64 data URL
- *   D. decode + downscale + export a clean JPEG data URL (+ Blob for upload); canvas released
+ * Strictly sequential photo preparation:
+ *   Step A (0ms, synchronous start): capture `fallbackObjectUrl` and immediately read the picker File
+ *          into RAM (`FileReader.readAsDataURL(file)` -> `file.arrayBuffer()` fallback) while the
+ *          Android `content://` grant is fresh.
+ *   Step B (400ms wakeup pause): wait for the mobile browser's GPU/Canvas context to settle after
+ *          closing the system Photo Picker.
+ *   Step C: decode + downscale + export a clean JPEG data URL (+ Blob for upload); canvas released.
  *
  * @param {File} file
  * @param {{
  *   isCurrent?: () => boolean,
- *   onFileCopied?: () => void,      // called once the picker File is no longer needed (remount <input>)
  *   maxDim: number,
  *   quality?: number,
  *   wakeupDelayMs?: number,
@@ -231,7 +290,6 @@ function baseName(file) {
  */
 export async function preparePhotoSequentially(file, {
   isCurrent = () => true,
-  onFileCopied,
   maxDim,
   quality = PREVIEW_JPEG_QUALITY,
   wakeupDelayMs = PHOTO_WAKEUP_DELAY_MS,
@@ -240,66 +298,133 @@ export async function preparePhotoSequentially(file, {
   const checkpoint = () => {
     if (!isCurrent()) throw new PhotoPipelineCancelled();
   };
+  checkpoint();
+
+  if (!file || file.size === 0) {
+    throw new Error('The selected photo is empty');
+  }
+
   const mime = guessImageMime(file);
 
-  // Step A
-  await sleep(wakeupDelayMs);
-  checkpoint();
-
-  // Step B (a single successful read; one retry only if the first read itself failed)
-  let arrayBuffer;
+  // Step A.1 (0ms): create an immediate object URL handle before any async gap
+  let fallbackObjectUrl = '';
   try {
-    arrayBuffer = await file.arrayBuffer();
-  } catch (readErr) {
-    console.warn('[PhotoPipeline] Reading the picked file failed, retrying once:', readErr?.message || readErr);
-    await sleep(DECODE_RETRY_DELAY_MS);
-    checkpoint();
-    arrayBuffer = await file.arrayBuffer();
-  }
-  checkpoint();
-  if (!arrayBuffer || arrayBuffer.byteLength === 0) throw new Error('The selected photo is empty');
-  const memoryBlob = new Blob([arrayBuffer], { type: mime });
-  arrayBuffer = null;
-  if (typeof onFileCopied === 'function') onFileCopied();
-
-  // GIF: keep the original bytes (a canvas would drop the animation)
-  if (mime === 'image/gif') {
-    const gifDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
-    checkpoint();
-    return {
-      previewUrl: gifDataUrl,
-      uploadFile: new File([memoryBlob], file?.name || 'photo.gif', { type: mime }),
-      previewFailed: false,
-      mime,
-    };
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && file instanceof Blob) {
+      fallbackObjectUrl = URL.createObjectURL(file);
+    }
+  } catch {
+    // ignore if unavailable
   }
 
-  // Step C
-  let rawDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
-  checkpoint();
-
-  // Step D
   try {
-    const { jpegDataUrl, jpegBlob } = await decode({ rawDataUrl, memoryBlob, maxDim, quality });
-    rawDataUrl = null;
+    // Step A.2 (0ms): start reading the picker File into RAM immediately on the current tick
+    let rawDataUrl = '';
+    let memoryBlob = null;
+    let lastReadErr = null;
+
+    // Primary read path: direct FileReader.readAsDataURL(file)
+    if (typeof FileReader !== 'undefined' && file instanceof Blob) {
+      try {
+        rawDataUrl = await readFileAsDataUrlDirect(file, mime);
+        memoryBlob = dataUrlToBlob(rawDataUrl);
+      } catch (frErr) {
+        lastReadErr = frErr;
+        rawDataUrl = '';
+        memoryBlob = null;
+        console.warn('[PhotoPipeline] Direct FileReader failed, trying arrayBuffer fallback:', frErr?.message || frErr);
+      }
+    }
+
+    // Secondary read path: file.arrayBuffer() (with one immediate retry if the first read fails)
+    if (!memoryBlob && typeof file.arrayBuffer === 'function') {
+      let arrayBuffer = null;
+      try {
+        arrayBuffer = await file.arrayBuffer();
+      } catch (firstAbErr) {
+        lastReadErr = firstAbErr;
+        console.warn('[PhotoPipeline] 1st arrayBuffer read failed, retrying once:', firstAbErr?.message || firstAbErr);
+        try {
+          arrayBuffer = await file.arrayBuffer();
+        } catch (secondAbErr) {
+          lastReadErr = secondAbErr;
+        }
+      }
+
+      if (arrayBuffer) {
+        if (arrayBuffer.byteLength === 0) {
+          throw new Error('The selected photo is empty');
+        }
+        memoryBlob = new Blob([arrayBuffer], { type: mime });
+        arrayBuffer = null;
+        rawDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
+      }
+    }
+
+    if (!memoryBlob && !rawDataUrl && !fallbackObjectUrl) {
+      throw lastReadErr || new Error('The selected photo could not be read');
+    }
+
     checkpoint();
-    return {
-      previewUrl: jpegDataUrl,
-      uploadFile: new File([jpegBlob], `${baseName(file)}.jpg`, { type: 'image/jpeg' }),
-      previewFailed: false,
-      mime: 'image/jpeg',
-    };
-  } catch (decodeErr) {
-    if (decodeErr instanceof PhotoPipelineCancelled) throw decodeErr;
-    // The browser cannot decode this format (e.g. HEIC on Android Chrome): upload the original bytes
-    console.warn('[PhotoPipeline] Browser cannot decode this format, uploading original bytes:', decodeErr?.message || decodeErr);
-    rawDataUrl = null;
-    checkpoint();
-    return {
-      previewUrl: '',
-      uploadFile: new File([memoryBlob], file?.name || 'photo', { type: mime }),
-      previewFailed: true,
-      mime,
-    };
+
+    // Step B: now that the file bytes are in RAM (or fallbackObjectUrl is captured), wait for the
+    // mobile browser's GPU / Canvas / WebGL context to finish waking up after the Photo Picker closes.
+    if (wakeupDelayMs > 0) {
+      await sleep(wakeupDelayMs);
+      checkpoint();
+    }
+
+    // GIF: keep the original bytes (a canvas would drop the animation)
+    if (mime === 'image/gif' && (rawDataUrl || memoryBlob)) {
+      const gifDataUrl = rawDataUrl || await readBlobAsDataUrl(memoryBlob, mime);
+      checkpoint();
+      return {
+        previewUrl: gifDataUrl,
+        uploadFile: new File([memoryBlob || file], file?.name || 'photo.gif', { type: mime }),
+        previewFailed: false,
+        mime,
+      };
+    }
+
+    // Step C: decode + downscale + export a clean JPEG data URL (+ Blob for upload)
+    try {
+      const { jpegDataUrl, jpegBlob } = await decode({
+        rawDataUrl,
+        memoryBlob,
+        fallbackObjectUrl,
+        maxDim,
+        quality,
+      });
+      rawDataUrl = '';
+      checkpoint();
+      return {
+        previewUrl: jpegDataUrl,
+        uploadFile: new File([jpegBlob], `${baseName(file)}.jpg`, { type: 'image/jpeg' }),
+        previewFailed: false,
+        mime: 'image/jpeg',
+      };
+    } catch (decodeErr) {
+      if (decodeErr instanceof PhotoPipelineCancelled) throw decodeErr;
+      checkpoint();
+      // If the file bytes were read into RAM (e.g. raw HEIC that Android Chrome cannot decode),
+      // never block the user — preserve the original bytes for upload and show the ready badge.
+      if (memoryBlob) {
+        console.warn('[PhotoPipeline] Browser cannot decode this format, uploading original bytes:', decodeErr?.message || decodeErr);
+        return {
+          previewUrl: '',
+          uploadFile: new File([memoryBlob], file?.name || 'photo', { type: mime }),
+          previewFailed: true,
+          mime,
+        };
+      }
+      throw lastReadErr || decodeErr;
+    }
+  } finally {
+    if (fallbackObjectUrl) {
+      try {
+        URL.revokeObjectURL(fallbackObjectUrl);
+      } catch {
+        // ignore
+      }
+    }
   }
 }
