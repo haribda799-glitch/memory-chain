@@ -1,21 +1,26 @@
 // ============================================================
-// Sequential photo preparation pipeline (Android Chrome safe)
+// Lightweight native photo preparation pipeline (Android safe)
 // ============================================================
 //
-// Why this exact order:
-// 1. On Android Chrome and MetaMask WebView, a picked `File` is backed by a temporary `content://`
-//    descriptor from the system Photo Picker. Waiting 400ms or unmounting `<input type="file">` BEFORE
-//    starting the read revokes that descriptor and triggers `NotReadableError`.
-// 2. Therefore, Step A starts reading the file into RAM IMMEDIATELY at 0ms (synchronously on the
-//    `onChange` tick) via `FileReader.readAsDataURL(file)` -> `file.arrayBuffer()` fallback, while also
-//    capturing an immediate `URL.createObjectURL(file)` fallback handle.
-// 3. Once the bytes are safely in RAM, Step B pauses 400ms (`PHOTO_WAKEUP_DELAY_MS`) so the mobile
-//    browser finishes resuming its GPU/Canvas/WebGL context after the Photo Picker closes, before any
-//    `new Image()`, `<canvas>`, or TF.js work runs.
+// Why this architecture prevents OOM / NotReadableError after 8-10 selections:
+// 1. NEVER read the raw multi-megabyte camera File (5-12 MB) into a huge UTF-16 Base64 string via
+//    `FileReader.readAsDataURL(file)` or copy full raw buffers in JS heap.
+// 2. At 0ms, create only a lightweight `rawObjectUrl = URL.createObjectURL(file)`.
+// 3. Pause 350ms (`PHOTO_WAKEUP_DELAY_MS`) so the mobile browser restores its graphics context after
+//    the system Photo Picker closes.
+// 4. Decode directly in browser C++ memory and draw straight into an 800px `<canvas>` (JPEG 0.82):
+//    - Attempt 1: native `createImageBitmap(file)` -> draw to 800px canvas -> `bitmap.close()` immediately.
+//    - Attempt 2: `new Image()` with `src = rawObjectUrl` (with 1 automatic retry after 400ms) -> draw to
+//      800px canvas.
+//    - Immediately after drawing to `<canvas>`, call `URL.revokeObjectURL(rawObjectUrl)`!
+// 5. Export compact `jpegBlob` (~70-100 KB via `canvas.toBlob(..., 'image/jpeg', 0.82)`) and short
+//    `previewDataUrl = canvas.toDataURL('image/jpeg', 0.82)`, then immediately zero the canvas
+//    (`canvas.width = 0; canvas.height = 0;`).
 
-export const PHOTO_WAKEUP_DELAY_MS = 400;   // Step B: let Chrome/WebView GPU resume after bytes are in RAM
-export const DECODE_RETRY_DELAY_MS = 400;   // Pause before the decode fallback retry
-export const PREVIEW_JPEG_QUALITY = 0.88;
+export const PHOTO_WAKEUP_DELAY_MS = 350;   // Step b: let mobile GPU/Canvas context settle after picker closes
+export const DECODE_RETRY_DELAY_MS = 400;   // Pause before the single Image() decode retry
+export const PREVIEW_MAX_DIMENSION = 800;   // Max 800px longest side for preview & upload
+export const PREVIEW_JPEG_QUALITY = 0.82;   // Compact 0.82 JPEG quality (~70-100 KB)
 
 /** Thrown when a newer selection / removal made the current pipeline run obsolete. */
 export class PhotoPipelineCancelled extends Error {
@@ -27,6 +32,39 @@ export class PhotoPipelineCancelled extends Error {
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Track every created blob: URL so clearing the photo ("X") can forcibly revoke any lingering URLs.
+const activeObjectUrls = new Set();
+
+export function createTrackedObjectUrl(blob) {
+  if (!blob || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return '';
+  try {
+    const url = URL.createObjectURL(blob);
+    if (url) activeObjectUrls.add(url);
+    return url;
+  } catch {
+    return '';
+  }
+}
+
+export function revokeTrackedObjectUrl(url) {
+  if (!url) return;
+  activeObjectUrls.delete(url);
+  if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function revokeAllTrackedObjectUrls() {
+  for (const url of Array.from(activeObjectUrls)) {
+    revokeTrackedObjectUrl(url);
+  }
+  activeObjectUrls.clear();
 }
 
 /** Best MIME type for a picked file (Android Photo Picker sometimes reports an empty type). */
@@ -54,55 +92,7 @@ export function normalizeImageDataUrl(dataUrl, mimeHint = 'image/jpeg') {
   return `data:${mimeHint};base64,${dataUrl.slice(commaIdx + 1)}`;
 }
 
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-/**
- * Initiates a direct `FileReader.readAsDataURL(file)` synchronously on the current tick.
- * Most reliable primary reader for `content://` URIs in Android Chrome and in-app WebViews.
- */
-export function readFileAsDataUrlDirect(file, mimeHint = guessImageMime(file)) {
-  return new Promise((resolve, reject) => {
-    if (typeof FileReader === 'undefined' || !(file instanceof Blob)) {
-      reject(new Error('FileReader unavailable for this input'));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const normalized = normalizeImageDataUrl(reader.result, mimeHint);
-      if (normalized) {
-        resolve(normalized);
-      } else {
-        reject(new Error('FileReader returned an empty data URL'));
-      }
-    };
-    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
-    reader.readAsDataURL(file);
-  });
-}
-
-/** In-memory Blob -> normalized `data:image/...;base64` URL (FileReader with base64 fallback). */
-export async function readBlobAsDataUrl(blob, mimeHint = blob?.type || 'image/jpeg') {
-  if (typeof FileReader !== 'undefined' && blob instanceof Blob) {
-    try {
-      return await readFileAsDataUrlDirect(blob, mimeHint);
-    } catch (err) {
-      console.warn('[PhotoPipeline] FileReader failed on Blob, using base64 fallback:', err?.message || err);
-    }
-  }
-  // The Blob lives in RAM, so reading it via arrayBuffer is safe
-  const base64 = arrayBufferToBase64(await blob.arrayBuffer());
-  return `data:${mimeHint};base64,${base64}`;
-}
-
-/** Synchronous `data:` URL -> Blob (no second canvas encode, no fetch). */
+/** Synchronous compact `data:` URL -> Blob fallback when `canvas.toBlob` is unavailable. */
 export function dataUrlToBlob(dataUrl) {
   const commaIdx = dataUrl.indexOf(',');
   const header = dataUrl.slice(5, commaIdx); // after "data:"
@@ -157,57 +147,76 @@ export function loadImageElement(src, timeoutMs = 10000) {
 }
 
 /**
- * Step C: decode the image from `rawDataUrl` (falling back to a fresh object URL of `memoryBlob`
- * or `fallbackObjectUrl`), draw it on a canvas (longest side <= maxDim), and export a clean JPEG.
- * The canvas memory is released in `finally`, on success AND on failure.
+ * Step c & d: decode directly in C++ memory via `createImageBitmap(file)` (or `new Image()` with
+ * `src = rawObjectUrl` + 1 retry after 400ms), draw onto a max 800px `<canvas>`, immediately close
+ * the bitmap and revoke `rawObjectUrl`, export compact `jpegBlob` (0.82) + `previewDataUrl` (0.82),
+ * and immediately zero the canvas (`width = 0; height = 0`).
  */
 export async function renderToJpeg({
-  rawDataUrl,
-  memoryBlob,
-  fallbackObjectUrl = '',
-  maxDim,
+  file,
+  rawObjectUrl = '',
+  maxDim = PREVIEW_MAX_DIMENSION,
   quality = PREVIEW_JPEG_QUALITY,
   retryDelayMs = DECODE_RETRY_DELAY_MS,
 }) {
+  let bitmap = null;
   let img = null;
-  let objectUrl = '';
+  let retryObjectUrl = '';
   let canvas = null;
   try {
+    let source = null;
+    let width = 0;
+    let height = 0;
     let lastDecodeErr = null;
-    if (rawDataUrl) {
+
+    // Attempt 1: native C++ createImageBitmap(file)
+    if (typeof createImageBitmap === 'function' && file) {
       try {
-        img = await loadImageElement(rawDataUrl);
-      } catch (firstErr) {
-        lastDecodeErr = firstErr;
-        console.warn('[PhotoPipeline] 1st decode failed, retrying via object URL:', firstErr?.message || firstErr);
-        if (retryDelayMs > 0) await sleep(retryDelayMs);
+        bitmap = await createImageBitmap(file);
+        width = bitmap.width;
+        height = bitmap.height;
+        if (width > 0 && height > 0) {
+          source = bitmap;
+        } else {
+          try { bitmap.close?.(); } catch {}
+          bitmap = null;
+        }
+      } catch (bmpErr) {
+        lastDecodeErr = bmpErr;
+        bitmap = null;
       }
     }
 
-    if (!img && memoryBlob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-      try {
-        objectUrl = URL.createObjectURL(memoryBlob);
-        img = await loadImageElement(objectUrl);
-      } catch (blobErr) {
-        lastDecodeErr = blobErr;
+    // Attempt 2: new Image() with src = rawObjectUrl (with 1 automatic retry after 400ms)
+    if (!source) {
+      const primaryUrl = rawObjectUrl || (file instanceof Blob ? createTrackedObjectUrl(file) : '');
+      if (primaryUrl) {
+        try {
+          img = await loadImageElement(primaryUrl);
+        } catch (firstErr) {
+          lastDecodeErr = firstErr;
+          console.warn('[PhotoPipeline] 1st Image decode failed, retrying after 400ms:', firstErr?.message || firstErr);
+          if (retryDelayMs > 0) await sleep(retryDelayMs);
+          retryObjectUrl = file instanceof Blob ? createTrackedObjectUrl(file) : primaryUrl;
+          try {
+            img = await loadImageElement(retryObjectUrl || primaryUrl);
+          } catch (secondErr) {
+            lastDecodeErr = secondErr;
+          }
+        }
+        if (img) {
+          width = img.naturalWidth || img.width;
+          height = img.naturalHeight || img.height;
+          if (width > 0 && height > 0) {
+            source = img;
+          }
+        }
       }
     }
 
-    if (!img && fallbackObjectUrl) {
-      try {
-        img = await loadImageElement(fallbackObjectUrl);
-      } catch (fallbackErr) {
-        lastDecodeErr = fallbackErr;
-      }
-    }
-
-    if (!img) {
+    if (!source || !width || !height) {
       throw lastDecodeErr || new Error('Image decode failed');
     }
-
-    const width = img.naturalWidth || img.width;
-    const height = img.naturalHeight || img.height;
-    if (!width || !height) throw new Error('Invalid image dimensions');
 
     const scale = Math.min(1, maxDim / Math.max(width, height));
     canvas = document.createElement('canvas');
@@ -217,28 +226,57 @@ export async function renderToJpeg({
     if (!ctx) throw new Error('Canvas 2D context unavailable');
     ctx.fillStyle = '#ffffff'; // JPEG has no alpha: avoid black backgrounds for transparent PNGs
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-    const jpegDataUrl = canvas.toDataURL('image/jpeg', quality);
-    if (!jpegDataUrl || !jpegDataUrl.startsWith('data:image/jpeg;base64,')) {
+    // Immediately free C++ bitmap / Image element and revoke object URLs right after drawing to canvas
+    if (bitmap) {
+      try { bitmap.close?.(); } catch {}
+      bitmap = null;
+    }
+    if (img) {
+      disposeImageElement(img);
+      img = null;
+    }
+    revokeTrackedObjectUrl(rawObjectUrl);
+    revokeTrackedObjectUrl(retryObjectUrl);
+
+    const previewDataUrl = canvas.toDataURL('image/jpeg', quality);
+    if (!previewDataUrl || !previewDataUrl.startsWith('data:image/jpeg;base64,')) {
       throw new Error('Canvas produced an empty JPEG');
     }
-    return { jpegDataUrl, jpegBlob: dataUrlToBlob(jpegDataUrl), width: canvas.width, height: canvas.height };
+
+    let jpegBlob = null;
+    if (typeof canvas.toBlob === 'function') {
+      jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    }
+    if (!jpegBlob) {
+      jpegBlob = dataUrlToBlob(previewDataUrl);
+    }
+
+    const outWidth = canvas.width;
+    const outHeight = canvas.height;
+    releaseCanvas(canvas);
+    canvas = null;
+
+    return {
+      jpegDataUrl: previewDataUrl,
+      jpegBlob,
+      width: outWidth,
+      height: outHeight,
+    };
   } finally {
     releaseCanvas(canvas);
-    disposeImageElement(img);
-    if (objectUrl) {
-      try {
-        URL.revokeObjectURL(objectUrl);
-      } catch {
-        // ignore
-      }
+    if (bitmap) {
+      try { bitmap.close?.(); } catch {}
     }
+    disposeImageElement(img);
+    revokeTrackedObjectUrl(rawObjectUrl);
+    revokeTrackedObjectUrl(retryObjectUrl);
   }
 }
 
 /**
- * Small canvas (longest side <= maxDim) of an already-prepared data URL, for TF.js.
+ * Small canvas (longest side <= maxDim) of the already-downsized 800px previewDataUrl, for TF.js.
  * The caller MUST pass the returned canvas to `releaseCanvas` in a `finally`.
  */
 export async function createAiInputCanvas(dataUrl, maxDim = 512) {
@@ -270,18 +308,39 @@ function baseName(file) {
 }
 
 /**
- * Strictly sequential photo preparation:
- *   Step A (0ms, synchronous start): capture `fallbackObjectUrl` and immediately read the picker File
- *          into RAM (`FileReader.readAsDataURL(file)` -> `file.arrayBuffer()` fallback) while the
- *          Android `content://` grant is fresh.
- *   Step B (400ms wakeup pause): wait for the mobile browser's GPU/Canvas context to settle after
- *          closing the system Photo Picker.
- *   Step C: decode + downscale + export a clean JPEG data URL (+ Blob for upload); canvas released.
+ * Verifies that a file handle is readable (used only when canvas decode fails, to distinguish an
+ * unsupported format like HEIC from a revoked/unreadable file descriptor). Reads at most 16 bytes.
+ */
+async function assertFileReadable(file) {
+  if (!file || file.size === 0) {
+    throw new Error('The selected photo is empty');
+  }
+  if (typeof file.slice === 'function') {
+    const slice = file.slice(0, 16);
+    if (slice && typeof slice.arrayBuffer === 'function') {
+      const buf = await slice.arrayBuffer();
+      if (!buf || buf.byteLength === 0) throw new Error('The selected photo is empty');
+      return;
+    }
+  }
+  if (typeof file.arrayBuffer === 'function') {
+    const buf = await file.arrayBuffer();
+    if (!buf || buf.byteLength === 0) throw new Error('The selected photo is empty');
+  }
+}
+
+/**
+ * Lightweight native photo preparation pipeline:
+ *   a) At 0ms, create only `rawObjectUrl = URL.createObjectURL(file)`.
+ *   b) Wait 350ms (`wakeupDelayMs`) for the mobile browser to restore its graphics context.
+ *   c) Decode in C++ memory (`createImageBitmap(file)` -> `new Image(rawObjectUrl)` fallback) and
+ *      draw into an 800px `<canvas>`, immediately closing the bitmap and revoking `rawObjectUrl`.
+ *   d) Export compact `jpegBlob` (0.82) + `previewDataUrl` (0.82) and zero the canvas.
  *
  * @param {File} file
  * @param {{
  *   isCurrent?: () => boolean,
- *   maxDim: number,
+ *   maxDim?: number,
  *   quality?: number,
  *   wakeupDelayMs?: number,
  *   decode?: typeof renderToJpeg,   // injectable for unit tests
@@ -290,7 +349,7 @@ function baseName(file) {
  */
 export async function preparePhotoSequentially(file, {
   isCurrent = () => true,
-  maxDim,
+  maxDim = PREVIEW_MAX_DIMENSION,
   quality = PREVIEW_JPEG_QUALITY,
   wakeupDelayMs = PHOTO_WAKEUP_DELAY_MS,
   decode = renderToJpeg,
@@ -306,95 +365,25 @@ export async function preparePhotoSequentially(file, {
 
   const mime = guessImageMime(file);
 
-  // Step A.1 (0ms): create an immediate object URL handle before any async gap
-  let fallbackObjectUrl = '';
-  try {
-    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && file instanceof Blob) {
-      fallbackObjectUrl = URL.createObjectURL(file);
-    }
-  } catch {
-    // ignore if unavailable
-  }
+  // Step a (0ms): create only a lightweight object URL handle (zero Base64 / zero buffer copy in RAM)
+  const rawObjectUrl = file instanceof Blob ? createTrackedObjectUrl(file) : '';
 
   try {
-    // Step A.2 (0ms): start reading the picker File into RAM immediately on the current tick
-    let rawDataUrl = '';
-    let memoryBlob = null;
-    let lastReadErr = null;
-
-    // Primary read path: direct FileReader.readAsDataURL(file)
-    if (typeof FileReader !== 'undefined' && file instanceof Blob) {
-      try {
-        rawDataUrl = await readFileAsDataUrlDirect(file, mime);
-        memoryBlob = dataUrlToBlob(rawDataUrl);
-      } catch (frErr) {
-        lastReadErr = frErr;
-        rawDataUrl = '';
-        memoryBlob = null;
-        console.warn('[PhotoPipeline] Direct FileReader failed, trying arrayBuffer fallback:', frErr?.message || frErr);
-      }
-    }
-
-    // Secondary read path: file.arrayBuffer() (with one immediate retry if the first read fails)
-    if (!memoryBlob && typeof file.arrayBuffer === 'function') {
-      let arrayBuffer = null;
-      try {
-        arrayBuffer = await file.arrayBuffer();
-      } catch (firstAbErr) {
-        lastReadErr = firstAbErr;
-        console.warn('[PhotoPipeline] 1st arrayBuffer read failed, retrying once:', firstAbErr?.message || firstAbErr);
-        try {
-          arrayBuffer = await file.arrayBuffer();
-        } catch (secondAbErr) {
-          lastReadErr = secondAbErr;
-        }
-      }
-
-      if (arrayBuffer) {
-        if (arrayBuffer.byteLength === 0) {
-          throw new Error('The selected photo is empty');
-        }
-        memoryBlob = new Blob([arrayBuffer], { type: mime });
-        arrayBuffer = null;
-        rawDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
-      }
-    }
-
-    if (!memoryBlob && !rawDataUrl && !fallbackObjectUrl) {
-      throw lastReadErr || new Error('The selected photo could not be read');
-    }
-
-    checkpoint();
-
-    // Step B: now that the file bytes are in RAM (or fallbackObjectUrl is captured), wait for the
-    // mobile browser's GPU / Canvas / WebGL context to finish waking up after the Photo Picker closes.
+    // Step b (350ms): wait for the mobile browser's graphics context to settle after closing the gallery
     if (wakeupDelayMs > 0) {
       await sleep(wakeupDelayMs);
       checkpoint();
     }
 
-    // GIF: keep the original bytes (a canvas would drop the animation)
-    if (mime === 'image/gif' && (rawDataUrl || memoryBlob)) {
-      const gifDataUrl = rawDataUrl || await readBlobAsDataUrl(memoryBlob, mime);
-      checkpoint();
-      return {
-        previewUrl: gifDataUrl,
-        uploadFile: new File([memoryBlob || file], file?.name || 'photo.gif', { type: mime }),
-        previewFailed: false,
-        mime,
-      };
-    }
-
-    // Step C: decode + downscale + export a clean JPEG data URL (+ Blob for upload)
+    // Step c & d: native decode -> 800px canvas (JPEG 0.82) -> immediate revokeObjectURL & canvas release
     try {
       const { jpegDataUrl, jpegBlob } = await decode({
-        rawDataUrl,
-        memoryBlob,
-        fallbackObjectUrl,
+        file,
+        rawObjectUrl,
         maxDim,
         quality,
       });
-      rawDataUrl = '';
+      revokeTrackedObjectUrl(rawObjectUrl);
       checkpoint();
       return {
         previewUrl: jpegDataUrl,
@@ -403,28 +392,26 @@ export async function preparePhotoSequentially(file, {
         mime: 'image/jpeg',
       };
     } catch (decodeErr) {
+      revokeTrackedObjectUrl(rawObjectUrl);
       if (decodeErr instanceof PhotoPipelineCancelled) throw decodeErr;
       checkpoint();
-      // If the file bytes were read into RAM (e.g. raw HEIC that Android Chrome cannot decode),
-      // never block the user — preserve the original bytes for upload and show the ready badge.
-      if (memoryBlob) {
-        console.warn('[PhotoPipeline] Browser cannot decode this format, uploading original bytes:', decodeErr?.message || decodeErr);
-        return {
-          previewUrl: '',
-          uploadFile: new File([memoryBlob], file?.name || 'photo', { type: mime }),
-          previewFailed: true,
-          mime,
-        };
-      }
-      throw lastReadErr || decodeErr;
+
+      // Verify whether the file descriptor is alive (e.g. unsupported HEIC vs NotReadableError)
+      await assertFileReadable(file);
+      checkpoint();
+
+      console.warn('[PhotoPipeline] Browser cannot decode this format, preserving original file:', decodeErr?.message || decodeErr);
+      const uploadFile = file instanceof File
+        ? file
+        : new File([file], file?.name || 'photo', { type: mime });
+      return {
+        previewUrl: '',
+        uploadFile,
+        previewFailed: true,
+        mime,
+      };
     }
   } finally {
-    if (fallbackObjectUrl) {
-      try {
-        URL.revokeObjectURL(fallbackObjectUrl);
-      } catch {
-        // ignore
-      }
-    }
+    revokeTrackedObjectUrl(rawObjectUrl);
   }
 }

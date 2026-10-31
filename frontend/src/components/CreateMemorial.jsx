@@ -27,6 +27,9 @@ import {
   createAiInputCanvas,
   preparePhotoSequentially,
   PhotoPipelineCancelled,
+  PREVIEW_MAX_DIMENSION,
+  PREVIEW_JPEG_QUALITY,
+  revokeAllTrackedObjectUrls,
 } from '../utils/photoPipeline';
 import ShareModal from './ShareModal';
 
@@ -40,14 +43,16 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 
 /* ── Photo processing constants ───────────────────────────── */
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
-const MAX_IMAGE_DIMENSION = 1000;             // px, longest side after compression
-const COMPRESSION_QUALITY = 0.8;              // JPEG compression quality (0.75 - 0.8)
+const MAX_IMAGE_DIMENSION = PREVIEW_MAX_DIMENSION; // 800px longest side after compression
+const COMPRESSION_QUALITY = PREVIEW_JPEG_QUALITY;  // 0.82 JPEG compression quality (~70-100 KB)
+const MIN_PREPARE_OVERLAY_MS = 1800;          // Minimum 1800ms full-screen freeze while preparing a photo
+const CLEAR_MEMORY_OVERLAY_MS = 900;          // 900ms full-screen freeze while clearing memory & GC on remove ("X")
 const AI_CHECK_COLD_TIMEOUT_MS = 15000;       // 15s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once models are cached
 
 const AI_INPUT_MAX_DIM = 512;                 // px, photos are downscaled before TF.js to keep GPU memory tiny
-const PREP_AI_WAIT_COLD_MS = 6000;            // Max time the "Preparing portrait" screen waits for the 1st (cold) AI check
-const PREP_AI_WAIT_WARM_MS = 3500;            // ...and for a warm AI check; slower checks finish in the background
+const PREP_AI_WAIT_COLD_MS = 4500;            // Max time the "Preparing Portrait" overlay waits for a cold AI check
+const PREP_AI_WAIT_WARM_MS = 2500;            // ...and for a warm AI check; slower checks finish in the background
 const RETRY_DELAY_MS = 350;                   // 350ms delay before automatic silent retry of image decode / AI check
 
 /* ── On-chain / validation constants ───────────────────────── */
@@ -214,7 +219,34 @@ let cachedObjectModelPromise = null;
 let isAiWarm = false;
 
 function resetAiModeration() {
-  // Do not call tf.disposeVariables() to avoid destroying BlazeFace / COCO-SSD model weights
+  // Lightweight reset when unmounting or completing form submission
+}
+
+/**
+ * Explicitly cleans up TF.js scopes and tensor variables when the user removes a photo ("X"),
+ * resetting model promises if variables were disposed so the next check cleanly re-initializes.
+ */
+async function cleanupTfMemory() {
+  if (!cachedTfReadyPromise) return;
+  try {
+    const tf = await cachedTfReadyPromise;
+    const engine = tf.engine();
+    try {
+      engine.endScope();
+    } catch {
+      // no open scope to end
+    }
+    try {
+      tf.disposeVariables();
+      cachedFaceModelPromise = null;
+      cachedObjectModelPromise = null;
+      isAiWarm = false;
+    } catch {
+      // ignore
+    }
+  } catch {
+    // ignore if TF.js failed to load
+  }
 }
 
 /**
@@ -413,20 +445,22 @@ export default function CreateMemorial() {
 
   /*
    * Photo model (identical rendering on Step 1 and Step 3):
-   *   - Selecting a photo starts reading the File into RAM IMMEDIATELY at 0ms (before any sleep or DOM
-   *     unmount), then pauses 400ms while the portrait card shows a calm loading state (`isPreparingPhoto`),
-   *     resizes to a canvas JPEG, and runs the AI check.
-   *   - Only then is the finished in-memory `data:image/jpeg;base64,...` written to `previewUrl` and the
-   *     <img> rendered, so it never races the background work.
-   *   - The <input type="file"> stays permanently mounted in the DOM (never remounted via `key`) so Android
-   *     Chrome and MetaMask WebView never revoke the active `content://` file descriptor mid-read.
-   *   - "Portrait Selected & Ready" is shown only when the browser genuinely cannot decode the format.
+   *   - Selecting a photo shows a full-screen blocking overlay (`isPreparingPhoto`, >= 1800ms) while
+   *     the lightweight native pipeline (`utils/photoPipeline.js`) creates a `rawObjectUrl`, waits 350ms,
+   *     decodes in C++ (`createImageBitmap` / `new Image`), draws to an 800px canvas (JPEG 0.82),
+   *     revokes `rawObjectUrl` immediately, and runs the TF.js check on the 800px preview.
+   *   - Removing a photo ("X") shows a full-screen blocking overlay (`isClearingPhoto`, 900ms), revokes
+   *     all object URLs, clears `previewUrl` & `photo`, disposes TF.js tensors, increments `inputResetKey`
+   *     to mount a fresh `<input type="file">`, and waits for Garbage Collection before unlocking UI.
    */
   const [isPreparingPhoto, setIsPreparingPhoto] = useState(false);
+  const [isClearingPhoto, setIsClearingPhoto] = useState(false);
+  const [inputResetKey, setInputResetKey] = useState(0);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
   const fileInputRef = useRef(null);
   const preparingLockRef = useRef(false);
+  const clearingLockRef = useRef(false);
   const previewRetryRef = useRef(0);
 
   const resetFileInput = useCallback(() => {
@@ -449,6 +483,8 @@ export default function CreateMemorial() {
     return () => {
       analysisRunIdRef.current += 1;
       preparingLockRef.current = false;
+      clearingLockRef.current = false;
+      revokeAllTrackedObjectUrls();
       resetAiModeration();
     };
   }, []);
@@ -458,22 +494,48 @@ export default function CreateMemorial() {
     analysisRunIdRef.current += 1; // cancels any in-flight pipeline run
     preparingLockRef.current = false;
     previewRetryRef.current = 0;
-    resetFileInput();
-    setIsPreparingPhoto(false);
+    revokeAllTrackedObjectUrls();
+    setPreviewUrl((prev) => {
+      if (typeof prev === 'string' && prev.startsWith('blob:')) {
+        try { URL.revokeObjectURL(prev); } catch {}
+      }
+      return null;
+    });
     setPhoto(null);
-    setPreviewUrl('');
+    setIsPreparingPhoto(false);
     setPreviewFailed(false);
     setPreviewKey((k) => k + 1);
     setCheckStatus('idle');
     setDetectedPerson(false);
     setDetectedAnimal(true);
     setHumanConsentGiven(false);
+    resetFileInput();
+    // Remount <input type="file"> ONLY when photo is cleared (never during reading)
+    setInputResetKey((k) => k + 1);
   }, [resetFileInput]);
 
-  const handleRemoveImage = useCallback(() => {
-    if (preparingLockRef.current) return; // the card is frozen while the photo is being prepared
-    clearPhotoState();
-    setError(null);
+  /**
+   * Clicking "X" to remove the photo: shows a 900ms full-screen "Clearing memory..." overlay,
+   * revokes all object URLs, nulls out previewUrl & photo, disposes TF.js tensors, remounts `<input>`,
+   * and waits in silence for V8 / Android WebView Garbage Collection before allowing the next click.
+   */
+  const handleRemoveImage = useCallback(async () => {
+    if (preparingLockRef.current || clearingLockRef.current) return;
+    clearingLockRef.current = true;
+    setIsClearingPhoto(true);
+    const clearStartedAt = Date.now();
+    try {
+      clearPhotoState();
+      setError(null);
+      await cleanupTfMemory();
+      const elapsed = Date.now() - clearStartedAt;
+      if (elapsed < CLEAR_MEMORY_OVERLAY_MS) {
+        await sleep(CLEAR_MEMORY_OVERLAY_MS - elapsed);
+      }
+    } finally {
+      clearingLockRef.current = false;
+      setIsClearingPhoto(false);
+    }
   }, [clearPhotoState]);
 
   const { writeContractAsync } = useWriteContract();
@@ -691,28 +753,36 @@ export default function CreateMemorial() {
       getObjectModel(),
     ]);
 
-    const outcome = await withTfScope(async () => {
-      let input = null;
+    const outcome = await withTfScope(async (tf) => {
+      let inputCanvas = null;
+      let inputTensor = null;
       let faces = [];
       let predictions = [];
       let faceFailed = false;
       let objectFailed = false;
       try {
-        input = await createAiInputCanvas(preparedDataUrl, AI_INPUT_MAX_DIM);
+        inputCanvas = await createAiInputCanvas(preparedDataUrl, AI_INPUT_MAX_DIM);
+        inputTensor = tf.tidy(() => tf.browser.fromPixels(inputCanvas));
+        // Free the temporary 2D canvas immediately once pixels are in the tensor
+        releaseCanvas(inputCanvas);
+        inputCanvas = null;
         try {
-          faces = await faceModel.estimateFaces(input, false);
+          faces = await faceModel.estimateFaces(inputTensor, false);
         } catch (faceErr) {
           faceFailed = true;
           console.warn('[AI Analysis] Face detection warning:', faceErr);
         }
         try {
-          predictions = await objectModel.detect(input);
+          predictions = await objectModel.detect(inputTensor);
         } catch (objErr) {
           objectFailed = true;
           console.warn('[AI Analysis] Object detection warning:', objErr);
         }
       } finally {
-        releaseCanvas(input);
+        if (inputTensor && typeof inputTensor.dispose === 'function') {
+          try { inputTensor.dispose(); } catch {}
+        }
+        releaseCanvas(inputCanvas);
       }
       return { faces, predictions, faceFailed, objectFailed };
     });
@@ -818,13 +888,13 @@ export default function CreateMemorial() {
   }, [runAiCheck]);
 
   /**
-   * Photo selection: freezes the portrait card and runs the strictly sequential pipeline
-   * (utils/photoPipeline.js steps A-D, then the AI check as step E). Step F unfreezes the card and renders
-   * the finished in-memory JPEG data URL.
+   * Photo selection: shows the full-screen blocking overlay (`isPreparingPhoto`, minimum 1800ms) and
+   * runs the lightweight native pipeline (0ms createObjectURL -> 350ms pause -> 800px canvas JPEG 0.82
+   * -> immediate revokeObjectURL -> TF.js check on 800px preview).
    */
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
-    if (preparingLockRef.current) return; // one photo at a time; the card is frozen meanwhile
+    if (preparingLockRef.current || clearingLockRef.current) return;
     // Multiplatform image validation (Android, iOS HEIC, Desktop)
     const looksLikeImage = Boolean(
       file.type?.startsWith('image/') ||
@@ -847,17 +917,20 @@ export default function CreateMemorial() {
     const isCurrent = () => runId === analysisRunIdRef.current;
     preparingLockRef.current = true;
     previewRetryRef.current = 0;
+    const prepStartedAt = Date.now();
 
-    // Start reading the file into RAM at 0ms BEFORE any React state updates or wakeup delay
+    // Start the lightweight pipeline at 0ms (captures rawObjectUrl immediately)
     const preparePromise = preparePhotoSequentially(file, {
       isCurrent,
-      maxDim: MAX_IMAGE_DIMENSION,
+      maxDim: PREVIEW_MAX_DIMENSION,
+      quality: PREVIEW_JPEG_QUALITY,
     });
 
-    // Freeze the portrait card: no <img> is rendered while the pipeline works
+    // Show full-screen blocking overlay (`fixed inset-0 z-[100]`) while the photo is prepared
+    revokeAllTrackedObjectUrls();
     setError(null);
     setPhoto(null);
-    setPreviewUrl('');
+    setPreviewUrl(null);
     setPreviewFailed(false);
     setCheckStatus('idle');
     setDetectedPerson(false);
@@ -870,9 +943,8 @@ export default function CreateMemorial() {
       resetFileInput();
       if (!isCurrent()) return;
 
-      // Step E: AI check, only on the finished in-memory JPEG (the resize canvas is already released).
-      // The card waits a bounded time; a slower (cold) check keeps running and updates the badge later.
-      if (prepared.previewFailed) {
+      // Step E: AI check on the already-downsized 800px JPEG previewDataUrl (the resize canvas is already zeroed).
+      if (prepared.previewFailed || !prepared.previewUrl) {
         setCheckStatus('skipped');
       } else {
         setCheckStatus('checking');
@@ -881,7 +953,14 @@ export default function CreateMemorial() {
         if (!isCurrent()) return;
       }
 
-      // Step F: unfreeze and render the prepared data URL
+      // Enforce at least 1800ms full-screen freeze so the browser calmly finishes all GPU/memory operations
+      const elapsed = Date.now() - prepStartedAt;
+      if (elapsed < MIN_PREPARE_OVERLAY_MS) {
+        await sleep(MIN_PREPARE_OVERLAY_MS - elapsed);
+      }
+      if (!isCurrent()) return;
+
+      // Step F: unfreeze and render the compact 800px JPEG data URL
       setPhoto(prepared.uploadFile);
       setPreviewUrl(prepared.previewUrl);
       setPreviewFailed(prepared.previewFailed);
@@ -890,8 +969,13 @@ export default function CreateMemorial() {
       resetFileInput();
       if (err instanceof PhotoPipelineCancelled || !isCurrent()) return;
       console.warn('[CreateMemorial] Photo preparation failed:', err?.message || err);
+      const elapsed = Date.now() - prepStartedAt;
+      if (elapsed < MIN_PREPARE_OVERLAY_MS) {
+        await sleep(MIN_PREPARE_OVERLAY_MS - elapsed);
+      }
+      if (!isCurrent()) return;
       setPhoto(null);
-      setPreviewUrl('');
+      setPreviewUrl(null);
       setCheckStatus('idle');
       setError('We could not read this photo. Please select it again.');
     } finally {
@@ -1650,8 +1734,9 @@ export default function CreateMemorial() {
             {/* Photo drop zone */}
             <div>
               <label className={labelBase}>Pet Portrait</label>
-              {/* File input kept permanently mounted so Android never revokes the picked file handle */}
+              {/* File input: remounted via inputResetKey ONLY when the photo is removed ("X"), never mid-read */}
               <input
+                key={`photo-input-${inputResetKey}`}
                 ref={fileInputRef}
                 id="photo-input"
                 type="file"
@@ -1681,7 +1766,7 @@ export default function CreateMemorial() {
                 }}
               />
 
-              {isPreparingPhoto ? (
+              {isPreparingPhoto || isClearingPhoto ? (
                 <div
                   className="relative w-full h-56 rounded-2xl overflow-hidden border border-amber-900/10 bg-[#fdfbf9] flex flex-col items-center justify-center text-center px-6 animate-fadeIn"
                   role="status"
@@ -1690,10 +1775,12 @@ export default function CreateMemorial() {
                 >
                   <span className="inline-block w-8 h-8 border-[3px] border-[#d48c6f] border-t-transparent rounded-full animate-spin mb-4" />
                   <span className="text-[15px] text-[#1b1c1a]" style={{ fontFamily: "'Libre Caslon Text', serif" }}>
-                    Preparing portrait...
+                    {isClearingPhoto ? 'Clearing memory...' : 'Preparing Portrait...'}
                   </span>
                   <span className="text-xs text-[#85736d] mt-1.5 max-w-xs leading-relaxed">
-                    Optimizing image &amp; initializing memory check — please wait a moment
+                    {isClearingPhoto
+                      ? 'Releasing image buffers — please wait'
+                      : 'Initializing memory & optimizing photo — please wait'}
                   </span>
                 </div>
               ) : photo ? (
@@ -2094,7 +2181,7 @@ export default function CreateMemorial() {
               <button
                 type="button"
                 onClick={() => {
-                  if (isPreparingPhoto) return;
+                  if (isPreparingPhoto || isClearingPhoto) return;
                   if (step === 0) {
                     const nameError = validatePetName(petName);
                     if (nameError) { setError(nameError); return; }
@@ -2112,7 +2199,7 @@ export default function CreateMemorial() {
                   setUnconfirmedTxHash(null);
                   setStep(s => s + 1);
                 }}
-                disabled={(step === 0 && detectedPerson && !humanConsentGiven) || isPreparingPhoto}
+                disabled={(step === 0 && detectedPerson && !humanConsentGiven) || isPreparingPhoto || isClearingPhoto}
                 className="flex items-center justify-center gap-2 bg-[#c27357] hover:bg-[#8a4f36] text-white px-8 py-3.5 rounded-2xl text-xs font-semibold tracking-widest uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-xs"
               >
                 <span>Continue</span>
@@ -2154,6 +2241,36 @@ export default function CreateMemorial() {
               </button>
             </div>
           )
+        )}
+
+        {/* Full-screen blocking overlay while preparing a portrait (>= 1800ms) or clearing memory on remove (900ms) */}
+        {(isPreparingPhoto || isClearingPhoto) && (
+          <div
+            className="fixed inset-0 z-[100] bg-[#2C221E]/45 backdrop-blur-sm flex items-center justify-center p-6 pointer-events-auto select-none touch-none animate-fadeIn"
+            role="alertdialog"
+            aria-modal="true"
+            aria-live="assertive"
+            aria-busy="true"
+          >
+            <div className="max-w-sm w-full bg-[#fdfbf9] border border-[#d8c2ba] rounded-3xl p-7 text-center shadow-2xl space-y-4">
+              <div className="w-14 h-14 rounded-full bg-[#f5efe6] border border-amber-900/10 flex items-center justify-center mx-auto">
+                <span className="inline-block w-7 h-7 border-[3px] border-[#c27357] border-t-transparent rounded-full animate-spin" />
+              </div>
+              <div className="space-y-1.5">
+                <h3
+                  className="text-xl text-[#1b1c1a]"
+                  style={{ fontFamily: "'Libre Caslon Text', serif" }}
+                >
+                  {isClearingPhoto ? 'Clearing memory...' : 'Preparing Portrait...'}
+                </h3>
+                <p className="text-xs text-[#85736d] leading-relaxed max-w-xs mx-auto">
+                  {isClearingPhoto
+                    ? 'Releasing image buffers — please wait'
+                    : 'Initializing memory & optimizing photo — please wait'}
+                </p>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Full-screen blocking modal while transaction is submitted to Base Sepolia and waiting for confirmation */}
