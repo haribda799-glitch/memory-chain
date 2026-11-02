@@ -195,7 +195,7 @@ export default function Gallery() {
     <>
       {/* Hero Section */}
       {/* Mobile (< md): vertical composition (clean photo on top, cream panel with text below). Desktop (md+): unchanged side overlay. */}
-      <section className="relative w-full min-h-[80vh] flex items-center bg-surface-container-low px-margin-mobile md:px-margin-desktop overflow-hidden max-md:min-h-0 max-md:items-start max-md:pt-[250px] max-md:bg-[#FAF6F0]">
+      <section className="relative w-full min-h-[80vh] flex items-center bg-surface-container-low px-margin-mobile md:px-margin-desktop overflow-hidden max-md:min-h-0 max-md:items-start max-md:pt-[250px] max-md:bg-[#fbf9f6]">
         <div className="absolute inset-0 z-0 max-md:bottom-auto max-md:h-[340px]">
           <img
             alt="Hero background"
@@ -204,11 +204,11 @@ export default function Gallery() {
           />
           {/* Desktop side gradient (md+ only) */}
           <div className="absolute inset-0 bg-gradient-to-r from-[#FAF6F0]/95 via-[#FAF6F0]/75 via-35% to-transparent to-52% max-md:hidden" />
-          {/* Mobile bottom-to-top cream gradient: top of the photo stays clean, bottom blends into the text panel */}
-          <div className="absolute inset-0 bg-gradient-to-t from-[#FAF6F0] via-[#FAF6F0]/95 via-[22%] to-transparent to-[55%] md:hidden" />
+          {/* Mobile bottom-to-top cream gradient: top of the photo stays clean, bottom blends seamlessly into bg-surface (#fbf9f6) */}
+          <div className="absolute inset-0 bg-gradient-to-t from-[#fbf9f6] via-[#fbf9f6]/95 via-[22%] to-transparent to-[55%] md:hidden" />
         </div>
         <div className="relative z-10 max-w-container-max mx-auto w-full">
-          <div className="flex flex-col justify-center space-y-stack-md py-20 md:max-w-[380px] lg:max-w-[400px] max-md:pt-0 max-md:pb-14 max-md:space-y-4">
+          <div className="flex flex-col justify-center space-y-stack-md py-20 md:max-w-[380px] lg:max-w-[400px] max-md:pt-0 max-md:pb-6 max-md:space-y-4">
             <h1 className="font-display-lg-mobile md:font-display-lg text-display-lg-mobile md:text-display-lg text-on-surface max-md:text-[32px] max-md:leading-[1.12]">
               Eternal memory for your beloved friend.
             </h1>
@@ -228,7 +228,7 @@ export default function Gallery() {
       </section>
 
       {/* Trust Block (Web3 Explanation) */}
-      <section className="py-24 px-margin-mobile md:px-margin-desktop bg-surface max-w-container-max mx-auto">
+      <section className="py-24 max-md:pt-7 md:py-24 px-margin-mobile md:px-margin-desktop bg-surface max-w-container-max mx-auto">
         <div className="text-center max-w-3xl mx-auto mb-16">
           <h2 className="font-headline-md text-headline-md text-on-surface mb-6">A Permanent Sanctuary</h2>
           <p className="font-body-lg text-body-lg text-on-surface-variant">
