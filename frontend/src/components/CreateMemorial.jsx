@@ -29,6 +29,7 @@ import {
   PhotoPipelineCancelled,
   PREVIEW_MAX_DIMENSION,
   PREVIEW_JPEG_QUALITY,
+  CACHED_OVERLAY_DELAY_MS,
   revokeAllTrackedObjectUrls,
   cachePhotoAiResult,
 } from '../utils/photoPipeline';
@@ -46,7 +47,8 @@ const labelBase = 'block text-[11px] font-semibold tracking-widest uppercase tex
 const MAX_RAW_PHOTO_BYTES = 30 * 1024 * 1024; // raw phone photos can be huge; we compress below
 const MAX_IMAGE_DIMENSION = PREVIEW_MAX_DIMENSION; // 800px longest side after compression
 const COMPRESSION_QUALITY = PREVIEW_JPEG_QUALITY;  // 0.82 JPEG compression quality (~70-100 KB)
-const MIN_PREPARE_OVERLAY_MS = 1000;          // Minimum 1000ms full-screen freeze while preparing a photo
+const MIN_PREPARE_OVERLAY_MS = 1000;          // Minimum 1000ms full-screen freeze while preparing a new photo
+const CACHED_PREPARE_OVERLAY_MS = CACHED_OVERLAY_DELAY_MS; // 800ms "Preparing Portrait..." overlay on sessionPhotoCache hit
 const CLEAR_MEMORY_OVERLAY_MS = 900;          // 900ms full-screen freeze while clearing memory & GC on remove ("X")
 const AI_CHECK_COLD_TIMEOUT_MS = 15000;       // 15s timeout for cold start while models download
 const AI_CHECK_WARM_TIMEOUT_MS = 5000;        // 5s timeout for warm start once models are cached
@@ -823,9 +825,13 @@ export default function CreateMemorial() {
     try {
       return await runAiInference(preparedDataUrl);
     } catch (err) {
+      const msg = String(err?.message || '');
+      if (/Image decode|Invalid image dimensions|Canvas 2D context/i.test(msg)) {
+        throw err;
+      }
       const backend = await getActiveTfBackend();
       if (backend && backend !== 'cpu') {
-        console.warn(`[AI Analysis] Inference failed on "${backend}" backend, retrying on CPU:`, err?.message || err);
+        console.warn(`[AI Analysis] Inference failed on "${backend}" backend, retrying on CPU:`, msg || err);
         const switched = await switchTfToCpuBackend();
         if (switched) return await runAiInference(preparedDataUrl);
       }
@@ -883,10 +889,28 @@ export default function CreateMemorial() {
       } else {
         console.warn('[AI Analysis] Timed out or unavailable after CPU retry — check skipped.');
         setCheckStatus('skipped');
+        if (sourceFile) {
+          cachePhotoAiResult(sourceFile, {
+            hasPerson: false,
+            hasAnimal: true,
+            detectedSpecies: '',
+            checkStatus: 'skipped',
+          });
+        }
       }
     } catch (err) {
       console.warn('[CreateMemorial] Image check error, check skipped:', err?.message || err);
-      if (isCurrent()) setCheckStatus('skipped');
+      if (isCurrent()) {
+        setCheckStatus('skipped');
+        if (sourceFile) {
+          cachePhotoAiResult(sourceFile, {
+            hasPerson: false,
+            hasAnimal: true,
+            detectedSpecies: '',
+            checkStatus: 'skipped',
+          });
+        }
+      }
     }
   }, [runAiCheck]);
 
@@ -894,18 +918,20 @@ export default function CreateMemorial() {
    * Photo selection:
    *   1. Starts reading the file's bytes at 0ms (or hits `sessionPhotoCache` on repeat selections)
    *      BEFORE any `sleep` and BEFORE `resetFileInput()`.
-   *   2. Shows the full-screen blocking overlay (`isPreparingPhoto`, minimum 1000ms).
-   *   3. Downscales to a compact 800px JPEG (`0.82` quality), caches the result in `sessionPhotoCache`,
+   *   2. Shows the full-screen blocking overlay (`isPreparingPhoto`, 800ms on sessionPhotoCache hit,
+   *      >= 1000ms on fresh decode).
+   *   3. Downscales to a compact 800px JPEG (`0.82` quality) — or seamlessly falls back to `memoryBlob` +
+   *      `rawDataUrl` if `<canvas>` decode fails on Samsung — caches the result in `sessionPhotoCache`,
    *      and resets `<input>.value` only AFTER reading has finished.
    */
   const handlePhotoSelect = useCallback(async (file) => {
     if (!file) return;
     if (preparingLockRef.current || clearingLockRef.current) return;
-    // Multiplatform image validation (Android, iOS HEIC, Desktop)
+    // Multiplatform image validation (Android virtual picker, downloaded WebP/AVIF with .jpg, iOS HEIC, Desktop)
     const looksLikeImage = Boolean(
       file.type?.startsWith('image/') ||
-      /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '') ||
-      (!file.type && file.size > 0)
+      /\.(jpe?g|jfif|png|webp|avif|bmp|gif|heic|heif)$/i.test(file.name || '') ||
+      ((!file.type || file.type === 'application/octet-stream') && file.size > 0)
     );
     if (!looksLikeImage || file.size === 0) {
       setError('Please select a valid image file (JPG, PNG, WebP, or HEIC)');
@@ -928,7 +954,7 @@ export default function CreateMemorial() {
     // Revoke any old tracked object URLs BEFORE starting the new 0ms read
     revokeAllTrackedObjectUrls();
 
-    // Start the pipeline synchronously at 0ms (checks sessionPhotoCache or starts FileReader.readAsDataURL)
+    // Start the pipeline synchronously at 0ms (checks sessionPhotoCache or captures bytes into memoryBlob at 0ms)
     const preparePromise = preparePhotoSequentially(file, {
       isCurrent,
       maxDim: PREVIEW_MAX_DIMENSION,
@@ -952,8 +978,8 @@ export default function CreateMemorial() {
       resetFileInput();
       if (!isCurrent()) return;
 
-      // Step E: Use cached AI moderation if available, otherwise run AI check on the 800px JPEG
-      if (prepared.fromCache && prepared.cachedAiResult) {
+      // Step E: Use cached AI moderation (or raw-fallback skipped status) if available, otherwise run AI check
+      if (prepared.cachedAiResult) {
         const ai = prepared.cachedAiResult;
         setDetectedPerson(Boolean(ai.hasPerson));
         setDetectedAnimal(ai.hasAnimal !== undefined ? Boolean(ai.hasAnimal) : true);
@@ -961,7 +987,7 @@ export default function CreateMemorial() {
           setSpecies((prev) => prev || ai.detectedSpecies);
         }
         setCheckStatus(ai.checkStatus || 'accepted');
-      } else if (prepared.previewFailed || !prepared.previewUrl) {
+      } else if (prepared.previewFailed || !prepared.previewUrl || prepared.usedRawFallback || prepared.mime === 'image/gif') {
         setCheckStatus('skipped');
       } else {
         setCheckStatus('checking');
@@ -970,14 +996,15 @@ export default function CreateMemorial() {
         if (!isCurrent()) return;
       }
 
-      // Enforce at least 1000ms full-screen freeze so the browser calmly finishes all GPU/memory operations
+      // Enforce 800ms overlay on sessionPhotoCache hit, or 1000ms on fresh decode
+      const targetOverlayMs = prepared.fromCache ? CACHED_PREPARE_OVERLAY_MS : MIN_PREPARE_OVERLAY_MS;
       const elapsed = Date.now() - prepStartedAt;
-      if (elapsed < MIN_PREPARE_OVERLAY_MS) {
-        await sleep(MIN_PREPARE_OVERLAY_MS - elapsed);
+      if (elapsed < targetOverlayMs) {
+        await sleep(targetOverlayMs - elapsed);
       }
       if (!isCurrent()) return;
 
-      // Step F: unfreeze and render the compact 800px JPEG data URL
+      // Step F: unfreeze and render the portrait preview
       setPhoto(prepared.uploadFile);
       setPreviewUrl(prepared.previewUrl);
       setPreviewFailed(prepared.previewFailed);

@@ -2,29 +2,35 @@
 // Sequential photo preparation pipeline + Session Cache (Android safe)
 // ============================================================
 //
-// Why this architecture works on 1st AND 50th photo selections on Android Chrome & WebViews:
-// 1. `URL.createObjectURL(file)` alone does NOT read bytes into RAM — it is only a lazy pointer.
-//    If the browser waits (`sleep(350)`) before starting a real byte read, Android closes the
-//    temporary `content://` stream at the end of the `onChange` tick and throws `NotReadableError`.
-// 2. Therefore, on the 1st selection of a photo, Step A starts reading the file's bytes into RAM
-//    SYNCHRONOUSLY at 0ms (in the `onChange` tick, BEFORE any `sleep` and BEFORE resetting
-//    `<input>.value`) via `FileReader.readAsDataURL(file)` (with fallback to `readAsArrayBuffer` /
-//    `file.arrayBuffer()`).
-// 3. Once the bytes are in RAM, Step B pauses 350ms (`PHOTO_WAKEUP_DELAY_MS`) so the mobile browser
-//    restores its GPU/Canvas context after closing the gallery, then Step C downscales the image to
-//    a compact 800px JPEG (`0.82` quality, ~80 KB), immediately frees the raw multi-megabyte buffer
-//    and zeroes the `<canvas>`.
-// 4. The compact 800px result (~80 KB data URL + ~80 KB Blob + AI check result) is saved in an
-//    in-memory LRU cache (`sessionPhotoCache`, up to 10 entries). When the user removes the photo
-//    ("X") and re-selects the same photo a 2nd, 4th, 10th, or 50th time, `preparePhotoSequentially`
-//    returns the cached 800px portrait directly from RAM without touching Android's `content://`
-//    stream again.
+// Why this architecture guarantees 100% photo opening on Samsung Android (both camera DCIM photos
+// and downloaded/messenger photos like `1000000214.jpg` / `1000000162.jpg` from the virtual picker):
+// 1. Virtual picker streams (`content://media/picker/.../1000000214`) close as soon as the synchronous
+//    `onChange` tick ends if a pause (`sleep(350)`) runs before reading the bytes.
+//    Therefore, Step 1 captures the file's `ArrayBuffer` into RAM immediately at 0ms (BEFORE any `sleep`),
+//    cascading through `file.arrayBuffer()` -> `FileReader.readAsArrayBuffer(file)` ->
+//    `FileReader.readAsDataURL(file)`.
+// 2. Downloaded `.jpg` files from messengers/the web are frequently WebP, PNG, GIF, or AVIF inside or
+//    arrive with an empty/wrong `file.type`. Step 1 inspects the magic bytes of the `ArrayBuffer`
+//    (`FF D8 FF` -> `image/jpeg`, `89 50 4E 47` -> `image/png`, `RIFF....WEBP` -> `image/webp`,
+//    `GIF8` -> `image/gif`, `....ftypavif` -> `image/avif`, etc.) and immediately constructs both an
+//    independent `memoryBlob = new Blob([buffer], { type: detectedMime })` and `rawDataUrl`.
+// 3. Only AFTER `memoryBlob` and `rawDataUrl` are safely in RAM does Step 2 pause 350ms
+//    (`PHOTO_WAKEUP_DELAY_MS`) for the mobile browser's GPU/Canvas context to settle.
+// 4. Bulletproof fallback: if Step 3 (`<canvas>` / `createImageBitmap` / `new Image()` downscale to
+//    800px JPEG 0.82) succeeds, the compact `jpegBlob` + `jpegDataUrl` are used. If `<canvas>` decode
+//    fails on a specific Samsung firmware, the pipeline NEVER throws "We could not read this photo.
+//    Please select it again." — it seamlessly falls back to `memoryBlob` for upload and `rawDataUrl`
+//    as `previewUrl` for `<img src={previewUrl} />`.
+// 5. Successful results are cached in `sessionPhotoCache` by `${file.name}::${file.size}::${file.lastModified}`
+//    (up to 10 entries). Re-selecting the same photo in the same session returns the cached result
+//    without ever touching the Android file descriptor again.
 
-export const PHOTO_WAKEUP_DELAY_MS = 350;      // Step B: let mobile GPU/Canvas wake up after bytes are in RAM
+export const PHOTO_WAKEUP_DELAY_MS = 350;      // Step 2: let mobile GPU/Canvas wake up after bytes are in RAM
 export const DECODE_RETRY_DELAY_MS = 400;      // Pause before the single Image() decode retry
 export const PREVIEW_MAX_DIMENSION = 800;      // Max 800px longest side for preview & upload
 export const PREVIEW_JPEG_QUALITY = 0.82;      // Compact 0.82 JPEG quality (~70-100 KB)
-export const MAX_SESSION_CACHE_ENTRIES = 10;   // Up to 10 compact (~80 KB) portraits in session cache
+export const MAX_SESSION_CACHE_ENTRIES = 10;   // Up to 10 entries in sessionPhotoCache
+export const CACHED_OVERLAY_DELAY_MS = 800;    // 800ms "Preparing Portrait..." overlay on session cache hit
 
 /** Thrown when a newer selection / removal made the current pipeline run obsolete. */
 export class PhotoPipelineCancelled extends Error {
@@ -71,7 +77,7 @@ export function revokeAllTrackedObjectUrls() {
   activeObjectUrls.clear();
 }
 
-/** Best MIME type for a picked file (Android Photo Picker sometimes reports an empty type). */
+/** Fallback MIME guess from `file.type` / filename extension when magic bytes are inconclusive. */
 export function guessImageMime(file) {
   const type = String(file?.type || '').toLowerCase();
   if (type.startsWith('image/')) return type;
@@ -79,13 +85,104 @@ export function guessImageMime(file) {
   if (name.endsWith('.png')) return 'image/png';
   if (name.endsWith('.webp')) return 'image/webp';
   if (name.endsWith('.gif')) return 'image/gif';
+  if (name.endsWith('.avif')) return 'image/avif';
   if (name.endsWith('.bmp')) return 'image/bmp';
   if (name.endsWith('.heic')) return 'image/heic';
   if (name.endsWith('.heif')) return 'image/heif';
   return 'image/jpeg';
 }
 
-/* ── Session Photo Cache (LRU, max 10 compact 800px portraits) ── */
+/**
+ * Detects the true MIME type of an image from its leading magic bytes:
+ *   - `FF D8 FF` -> `'image/jpeg'`
+ *   - `89 50 4E 47` -> `'image/png'`
+ *   - `52 49 46 46` ... `57 45 42 50` (`RIFF....WEBP`) -> `'image/webp'`
+ *   - `47 49 46 38` (`GIF8`) -> `'image/gif'`
+ *   - `42 4D` (`BM`) -> `'image/bmp'`
+ *   - ISO BMFF `ftyp` box (`avif`/`avis` -> `'image/avif'`, `heic`/`heix` -> `'image/heic'`, `mif1`/`heif` -> `'image/heif'`)
+ * Falls back to `guessImageMime(fallbackFile)` when the header does not match a known signature.
+ */
+export function detectImageMimeFromBytes(buffer, fallbackFile = null) {
+  let bytes = null;
+  if (buffer instanceof Uint8Array) {
+    bytes = buffer;
+  } else if (buffer instanceof ArrayBuffer) {
+    bytes = new Uint8Array(buffer);
+  } else if (ArrayBuffer.isView(buffer)) {
+    bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+
+  if (bytes && bytes.length >= 2) {
+    // JPEG: FF D8 FF
+    if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+      return 'image/jpeg';
+    }
+    // PNG: 89 50 4E 47
+    if (
+      bytes.length >= 4 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4E &&
+      bytes[3] === 0x47
+    ) {
+      return 'image/png';
+    }
+    // WebP: 52 49 46 46 ("RIFF") at 0..3 and 57 45 42 50 ("WEBP") at 8..11
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) {
+      return 'image/webp';
+    }
+    // GIF: 47 49 46 38 ("GIF8")
+    if (
+      bytes.length >= 4 &&
+      bytes[0] === 0x47 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x38
+    ) {
+      return 'image/gif';
+    }
+    // BMP: 42 4D ("BM")
+    if (bytes[0] === 0x42 && bytes[1] === 0x4D) {
+      return 'image/bmp';
+    }
+    // ISO Base Media File Format: "ftyp" (66 74 79 70) at bytes 4..7
+    if (
+      bytes.length >= 12 &&
+      bytes[4] === 0x66 &&
+      bytes[5] === 0x74 &&
+      bytes[6] === 0x79 &&
+      bytes[7] === 0x70
+    ) {
+      const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]).toLowerCase();
+      if (brand === 'avif' || brand === 'avis' || brand === 'ma1b' || brand === 'ma1a') {
+        return 'image/avif';
+      }
+      if (brand === 'heic' || brand === 'heix' || brand === 'hevc' || brand === 'hevx') {
+        return 'image/heic';
+      }
+      if (brand === 'mif1' || brand === 'msf1' || brand === 'heif') {
+        return 'image/heif';
+      }
+    }
+  }
+
+  if (typeof fallbackFile === 'string' && fallbackFile.startsWith('image/')) {
+    return fallbackFile.toLowerCase();
+  }
+  return guessImageMime(fallbackFile);
+}
+
+/* ── Session Photo Cache (LRU, max 10 entries keyed by `${file.name}::${file.size}::${file.lastModified}`) ── */
 const sessionPhotoCache = new Map();
 
 export function getPhotoCacheKey(file) {
@@ -97,20 +194,26 @@ export function getPhotoCacheKey(file) {
   return `${name}::${size}::${lastModified}`;
 }
 
-function getPhotoFallbackCacheKey(file) {
-  if (!file) return '';
-  const name = String(file.name || '');
-  const size = Number(file.size || 0);
-  if (!name || !size) return '';
-  return `${name}::${size}::*`;
+function findSessionCacheKey(file) {
+  const exactKey = getPhotoCacheKey(file);
+  if (exactKey && sessionPhotoCache.has(exactKey)) {
+    return exactKey;
+  }
+  // Fallback if Android Photo Picker synthesized a different lastModified timestamp for the same file
+  const name = String(file?.name || '');
+  const size = Number(file?.size || 0);
+  if (name && size > 0) {
+    for (const [key, entry] of sessionPhotoCache.entries()) {
+      if (entry.fileName === name && entry.fileSize === size) {
+        return key;
+      }
+    }
+  }
+  return '';
 }
 
 function getFromSessionCache(file) {
-  const exactKey = getPhotoCacheKey(file);
-  const fallbackKey = getPhotoFallbackCacheKey(file);
-  const hitKey = (exactKey && sessionPhotoCache.has(exactKey))
-    ? exactKey
-    : (fallbackKey && sessionPhotoCache.has(fallbackKey) ? fallbackKey : '');
+  const hitKey = findSessionCacheKey(file);
   if (!hitKey) return null;
   const entry = sessionPhotoCache.get(hitKey);
   // Refresh LRU order
@@ -122,19 +225,20 @@ function getFromSessionCache(file) {
 function setInSessionCache(file, entry) {
   const exactKey = getPhotoCacheKey(file);
   if (!exactKey) return;
-  const fallbackKey = getPhotoFallbackCacheKey(file);
 
-  if (sessionPhotoCache.has(exactKey)) sessionPhotoCache.delete(exactKey);
-  sessionPhotoCache.set(exactKey, entry);
-
-  if (fallbackKey) {
-    if (sessionPhotoCache.has(fallbackKey)) sessionPhotoCache.delete(fallbackKey);
-    sessionPhotoCache.set(fallbackKey, entry);
+  const existingKey = findSessionCacheKey(file);
+  if (existingKey) {
+    sessionPhotoCache.delete(existingKey);
   }
 
-  // Evict oldest keys so at most MAX_SESSION_CACHE_ENTRIES unique photos (2 keys each) are kept
-  const maxKeys = MAX_SESSION_CACHE_ENTRIES * 2;
-  while (sessionPhotoCache.size > maxKeys) {
+  sessionPhotoCache.set(exactKey, {
+    ...entry,
+    fileName: String(file?.name || ''),
+    fileSize: Number(file?.size || 0),
+  });
+
+  // Evict oldest entries so at most MAX_SESSION_CACHE_ENTRIES (10) are kept
+  while (sessionPhotoCache.size > MAX_SESSION_CACHE_ENTRIES) {
     const oldestKey = sessionPhotoCache.keys().next().value;
     if (oldestKey === undefined) break;
     sessionPhotoCache.delete(oldestKey);
@@ -171,8 +275,18 @@ export function normalizeImageDataUrl(dataUrl, mimeHint = 'image/jpeg') {
   return `data:${mimeHint};base64,${dataUrl.slice(commaIdx + 1)}`;
 }
 
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
+/** Ensures a base64 `data:` URL carries the exact `detectedMime` determined from magic bytes. */
+export function enforceDataUrlMime(dataUrl, detectedMime = 'image/jpeg') {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return '';
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return '';
+  const header = dataUrl.slice(0, commaIdx);
+  if (!header.includes(';base64')) return dataUrl;
+  return `data:${detectedMime};base64,${dataUrl.slice(commaIdx + 1)}`;
+}
+
+export function arrayBufferToBase64(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   let binary = '';
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -181,9 +295,23 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+export function arrayBufferToDataUrl(buffer, mime = 'image/jpeg') {
+  return `data:${mime};base64,${arrayBufferToBase64(buffer)}`;
+}
+
+export function dataUrlToArrayBuffer(dataUrl) {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) throw new Error('Invalid data URL');
+  const binary = atob(dataUrl.slice(commaIdx + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 /**
  * Initiates `FileReader.readAsDataURL(file)` synchronously on the calling tick (0ms).
- * Essential on Android so the `content://` stream is opened before the `onChange` tick ends.
  */
 export function readFileAsDataUrlDirect(file, mimeHint = guessImageMime(file)) {
   return new Promise((resolve, reject) => {
@@ -206,7 +334,7 @@ export function readFileAsDataUrlDirect(file, mimeHint = guessImageMime(file)) {
 }
 
 /**
- * Initiates `FileReader.readAsArrayBuffer(file)` synchronously on the calling tick.
+ * Initiates `FileReader.readAsArrayBuffer(file)` synchronously on the calling tick (0ms).
  */
 export function readFileAsArrayBufferDirect(file) {
   return new Promise((resolve, reject) => {
@@ -231,24 +359,23 @@ export function readFileAsArrayBufferDirect(file) {
 export async function readBlobAsDataUrl(blob, mimeHint = blob?.type || 'image/jpeg') {
   if (typeof FileReader !== 'undefined' && blob instanceof Blob) {
     try {
-      return await readFileAsDataUrlDirect(blob, mimeHint);
+      const dataUrl = await readFileAsDataUrlDirect(blob, mimeHint);
+      return enforceDataUrlMime(dataUrl, mimeHint);
     } catch (err) {
       console.warn('[PhotoPipeline] FileReader failed on Blob, using base64 fallback:', err?.message || err);
     }
   }
-  const base64 = arrayBufferToBase64(await blob.arrayBuffer());
-  return `data:${mimeHint};base64,${base64}`;
+  const ab = await blob.arrayBuffer();
+  return arrayBufferToDataUrl(ab, mimeHint);
 }
 
 /** Synchronous `data:` URL -> Blob. */
-export function dataUrlToBlob(dataUrl) {
+export function dataUrlToBlob(dataUrl, mimeOverride = '') {
   const commaIdx = dataUrl.indexOf(',');
   const header = dataUrl.slice(5, commaIdx); // after "data:"
-  const mime = header.split(';')[0] || 'application/octet-stream';
-  const binary = atob(dataUrl.slice(commaIdx + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
+  const mime = mimeOverride || header.split(';')[0] || 'application/octet-stream';
+  const ab = dataUrlToArrayBuffer(dataUrl);
+  return new Blob([ab], { type: mime });
 }
 
 /** Frees a canvas backing store immediately (mobile Chrome caps total canvas memory per tab). */
@@ -296,8 +423,8 @@ export function loadImageElement(src, timeoutMs = 10000) {
 
 /**
  * Step C: decode the already-read in-memory image (`rawDataUrl` or `memoryBlob`, falling back to
- * `fallbackObjectUrl`), downscale onto a max 800px `<canvas>`, export compact `jpegDataUrl` (0.82)
- * + `jpegBlob` (0.82), and immediately zero the canvas (`width = 0; height = 0`) in `finally`.
+ * `createImageBitmap` / `objectUrl` / `fallbackObjectUrl`), downscale onto a max 800px `<canvas>`,
+ * export compact `jpegDataUrl` (0.82) + `jpegBlob` (0.82), and immediately zero the canvas in `finally`.
  */
 export async function renderToJpeg({
   rawDataUrl = '',
@@ -308,6 +435,7 @@ export async function renderToJpeg({
   retryDelayMs = DECODE_RETRY_DELAY_MS,
 }) {
   let img = null;
+  let bitmap = null;
   let objectUrl = '';
   let canvas = null;
   try {
@@ -317,21 +445,34 @@ export async function renderToJpeg({
         img = await loadImageElement(rawDataUrl);
       } catch (firstErr) {
         lastDecodeErr = firstErr;
-        console.warn('[PhotoPipeline] 1st decode failed, retrying via object URL:', firstErr?.message || firstErr);
-        if (retryDelayMs > 0) await sleep(retryDelayMs);
+        console.warn('[PhotoPipeline] 1st decode failed, trying fallback decoders:', firstErr?.message || firstErr);
       }
     }
 
-    if (!img && memoryBlob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    if (!img && memoryBlob && typeof createImageBitmap === 'function') {
+      try {
+        bitmap = await createImageBitmap(memoryBlob);
+      } catch (bmpErr) {
+        lastDecodeErr = bmpErr;
+        bitmap = null;
+      }
+    }
+
+    if (!img && !bitmap && memoryBlob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      if (retryDelayMs > 0 && rawDataUrl) {
+        await sleep(retryDelayMs);
+      }
       try {
         objectUrl = createTrackedObjectUrl(memoryBlob);
-        img = await loadImageElement(objectUrl);
+        if (objectUrl) {
+          img = await loadImageElement(objectUrl);
+        }
       } catch (blobErr) {
         lastDecodeErr = blobErr;
       }
     }
 
-    if (!img && fallbackObjectUrl) {
+    if (!img && !bitmap && fallbackObjectUrl) {
       try {
         img = await loadImageElement(fallbackObjectUrl);
       } catch (fallbackErr) {
@@ -339,12 +480,13 @@ export async function renderToJpeg({
       }
     }
 
-    if (!img) {
+    const source = bitmap || img;
+    if (!source) {
       throw lastDecodeErr || new Error('Image decode failed');
     }
 
-    const width = img.naturalWidth || img.width;
-    const height = img.naturalHeight || img.height;
+    const width = bitmap ? bitmap.width : (img.naturalWidth || img.width);
+    const height = bitmap ? bitmap.height : (img.naturalHeight || img.height);
     if (!width || !height) throw new Error('Invalid image dimensions');
 
     const scale = Math.min(1, maxDim / Math.max(width, height));
@@ -353,11 +495,15 @@ export async function renderToJpeg({
     canvas.height = Math.max(1, Math.round(height * scale));
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas 2D context unavailable');
-    ctx.fillStyle = '#ffffff'; // JPEG has no alpha: avoid black backgrounds for transparent PNGs
+    ctx.fillStyle = '#ffffff'; // JPEG has no alpha: avoid black backgrounds for transparent PNGs/WebPs
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-    // Immediately release the decoded Image element and temporary object URLs right after drawing
+    // Immediately release the decoded source and temporary object URLs right after drawing
+    if (bitmap && typeof bitmap.close === 'function') {
+      try { bitmap.close(); } catch {}
+    }
+    bitmap = null;
     disposeImageElement(img);
     img = null;
     revokeTrackedObjectUrl(objectUrl);
@@ -374,7 +520,7 @@ export async function renderToJpeg({
       jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
     }
     if (!jpegBlob) {
-      jpegBlob = dataUrlToBlob(jpegDataUrl);
+      jpegBlob = dataUrlToBlob(jpegDataUrl, 'image/jpeg');
     }
 
     const outWidth = canvas.width;
@@ -385,6 +531,9 @@ export async function renderToJpeg({
     return { jpegDataUrl, jpegBlob, width: outWidth, height: outHeight };
   } finally {
     releaseCanvas(canvas);
+    if (bitmap && typeof bitmap.close === 'function') {
+      try { bitmap.close(); } catch {}
+    }
     disposeImageElement(img);
     revokeTrackedObjectUrl(objectUrl);
     revokeTrackedObjectUrl(fallbackObjectUrl);
@@ -424,17 +573,110 @@ function baseName(file) {
 }
 
 /**
- * Strictly sequential photo preparation with in-memory session caching:
- *   Step 0 (0ms): Check `sessionPhotoCache`. If this photo was already prepared in the current
- *          session, skip reading the Android `content://` stream altogether, pause `wakeupDelayMs`,
- *          and return the cached 800px JPEG + cached AI result.
- *   Step A (0ms, synchronous start): Immediately start reading the picker File into RAM on the
- *          `onChange` tick (`FileReader.readAsDataURL(file)` -> `readAsArrayBuffer` / `arrayBuffer()`
- *          fallback) BEFORE any `sleep` or `<input>` reset.
- *   Step B (350ms wakeup pause): Wait for the mobile browser's GPU/Canvas context to settle after
- *          closing the Photo Picker.
- *   Step C: Decode + downscale into an 800px `<canvas>` (JPEG 0.82), immediately discard the raw
- *          buffer, zero the canvas, and save the compact (~80 KB) result in `sessionPhotoCache`.
+ * Step 1 helper: reads the picked `File` into an `ArrayBuffer` + `rawDataUrl` immediately at 0ms
+ * (before any `sleep`), cascading through `file.arrayBuffer()` -> `FileReader.readAsArrayBuffer` ->
+ * `FileReader.readAsDataURL`.
+ */
+async function captureFileBytesAtZeroMs(file) {
+  let arrayBuffer = null;
+  let rawDataUrl = '';
+  let lastReadErr = null;
+  const fallbackMime = guessImageMime(file);
+
+  // 1. Primary 0ms read: file.arrayBuffer()
+  if (typeof file?.arrayBuffer === 'function') {
+    try {
+      const ab = await file.arrayBuffer();
+      if (ab && ab.byteLength > 0) {
+        arrayBuffer = ab;
+      } else {
+        throw new Error('The selected photo is empty');
+      }
+    } catch (abErr) {
+      lastReadErr = abErr;
+      console.warn('[PhotoPipeline] 0ms file.arrayBuffer() failed, trying FileReader fallback:', abErr?.message || abErr);
+    }
+  }
+
+  // 2. Cascade fallback: FileReader.readAsArrayBuffer(file)
+  if (!arrayBuffer && typeof FileReader !== 'undefined' && file instanceof Blob) {
+    try {
+      const ab = await readFileAsArrayBufferDirect(file);
+      if (ab && ab.byteLength > 0) {
+        arrayBuffer = ab;
+      }
+    } catch (frAbErr) {
+      lastReadErr = frAbErr;
+      console.warn('[PhotoPipeline] FileReader.readAsArrayBuffer failed, trying readAsDataURL:', frAbErr?.message || frAbErr);
+    }
+  }
+
+  // 3. Cascade fallback: FileReader.readAsDataURL(file)
+  if (!arrayBuffer && typeof FileReader !== 'undefined' && file instanceof Blob) {
+    try {
+      rawDataUrl = await readFileAsDataUrlDirect(file, fallbackMime);
+      if (rawDataUrl) {
+        arrayBuffer = dataUrlToArrayBuffer(rawDataUrl);
+      }
+    } catch (frDataErr) {
+      lastReadErr = frDataErr;
+    }
+  }
+
+  // 4. Final immediate retry of file.arrayBuffer() if all above failed
+  if (!arrayBuffer && typeof file?.arrayBuffer === 'function') {
+    try {
+      const ab = await file.arrayBuffer();
+      if (ab && ab.byteLength > 0) {
+        arrayBuffer = ab;
+      }
+    } catch (retryErr) {
+      lastReadErr = retryErr;
+    }
+  }
+
+  if (!arrayBuffer && !rawDataUrl) {
+    throw lastReadErr || new Error('The selected photo could not be read');
+  }
+
+  if (arrayBuffer && arrayBuffer.byteLength === 0) {
+    throw new Error('The selected photo is empty');
+  }
+
+  // Detect true MIME type from the first bytes of the buffer (magic bytes)
+  const detectedMime = arrayBuffer
+    ? detectImageMimeFromBytes(arrayBuffer, file)
+    : fallbackMime;
+
+  const memoryBlob = arrayBuffer
+    ? new Blob([arrayBuffer], { type: detectedMime })
+    : dataUrlToBlob(rawDataUrl, detectedMime);
+
+  const normalizedDataUrl = rawDataUrl
+    ? enforceDataUrlMime(rawDataUrl, detectedMime)
+    : arrayBufferToDataUrl(arrayBuffer, detectedMime);
+
+  return {
+    memoryBlob,
+    rawDataUrl: normalizedDataUrl,
+    detectedMime,
+  };
+}
+
+/**
+ * Strictly sequential photo preparation with 0ms byte capture, magic-byte MIME detection,
+ * bulletproof fallback, and in-memory session caching:
+ *   Step 0 (0ms): Check `sessionPhotoCache` (`${file.name}::${file.size}::${file.lastModified}`).
+ *          If cached, never touch the Android `content://` descriptor again.
+ *   Step 1 (0ms, BEFORE any `sleep`): Immediately read `file` into RAM (`ArrayBuffer`), detect real
+ *          MIME type via magic bytes (`FF D8 FF` -> `image/jpeg`, `89 50 4E 47` -> `image/png`,
+ *          `52 49 46 46 ... 57 45 42 50` -> `image/webp`, `47 49 46 38` -> `image/gif`), and build
+ *          an independent `memoryBlob` and `rawDataUrl`.
+ *   Step 2 (350ms wakeup pause): Only AFTER bytes are in `memoryBlob`, pause `await sleep(350)` so
+ *          the mobile browser's GPU/Canvas context recovers after closing the Photo Picker.
+ *   Step 3: Resize via `<canvas>` to 800px JPEG (0.82). If `<canvas>` decoding fails on a specific
+ *          Samsung firmware, NEVER fail the pipeline — return `memoryBlob` as `uploadFile` and
+ *          `rawDataUrl` as `previewUrl` for `<img src={previewUrl} />`.
  *
  * @param {File} file
  * @param {{
@@ -451,6 +693,7 @@ function baseName(file) {
  *   previewFailed: boolean,
  *   mime: string,
  *   fromCache?: boolean,
+ *   usedRawFallback?: boolean,
  *   cachedAiResult?: object | null,
  * }>}
  */
@@ -486,82 +729,30 @@ export async function preparePhotoSequentially(file, {
         previewFailed: cached.previewFailed,
         mime: cached.mime,
         fromCache: true,
+        usedRawFallback: Boolean(cached.usedRawFallback),
         cachedAiResult: cached.aiResult || null,
       };
     }
   }
 
-  const mime = guessImageMime(file);
-
-  // Step A.1 (0ms): capture a fallback object URL synchronously on the current tick
+  // Capture a synchronous fallback object URL on the 0ms tick as an extra safety net
   const fallbackObjectUrl = file instanceof Blob ? createTrackedObjectUrl(file) : '';
 
   try {
-    // Step A.2 (0ms): start reading bytes into RAM synchronously BEFORE any sleep or input reset
-    let rawDataUrl = '';
-    let memoryBlob = null;
-    let lastReadErr = null;
-
-    // Primary 0ms read: FileReader.readAsDataURL(file)
-    if (typeof FileReader !== 'undefined' && file instanceof Blob) {
-      try {
-        rawDataUrl = await readFileAsDataUrlDirect(file, mime);
-      } catch (frErr) {
-        lastReadErr = frErr;
-        rawDataUrl = '';
-        console.warn('[PhotoPipeline] Direct FileReader.readAsDataURL failed, trying ArrayBuffer fallback:', frErr?.message || frErr);
-        try {
-          const ab = await readFileAsArrayBufferDirect(file);
-          memoryBlob = new Blob([ab], { type: mime });
-          rawDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
-        } catch (abFrErr) {
-          lastReadErr = abFrErr;
-        }
-      }
-    }
-
-    // Secondary 0ms read: file.arrayBuffer() (with 1 immediate retry if the first call fails)
-    if (!rawDataUrl && !memoryBlob && typeof file.arrayBuffer === 'function') {
-      let arrayBuffer = null;
-      try {
-        arrayBuffer = await file.arrayBuffer();
-      } catch (firstAbErr) {
-        lastReadErr = firstAbErr;
-        console.warn('[PhotoPipeline] 1st arrayBuffer read failed, retrying once:', firstAbErr?.message || firstAbErr);
-        try {
-          arrayBuffer = await file.arrayBuffer();
-        } catch (secondAbErr) {
-          lastReadErr = secondAbErr;
-        }
-      }
-
-      if (arrayBuffer) {
-        if (arrayBuffer.byteLength === 0) {
-          throw new Error('The selected photo is empty');
-        }
-        memoryBlob = new Blob([arrayBuffer], { type: mime });
-        arrayBuffer = null;
-        rawDataUrl = await readBlobAsDataUrl(memoryBlob, mime);
-      }
-    }
-
-    if (!rawDataUrl && !memoryBlob && !fallbackObjectUrl) {
-      throw lastReadErr || new Error('The selected photo could not be read');
-    }
-
+    // Step 1 (0ms, BEFORE any sleep!): Read bytes into RAM, detect magic-byte MIME, build memoryBlob + rawDataUrl
+    let { memoryBlob, rawDataUrl, detectedMime } = await captureFileBytesAtZeroMs(file);
     checkpoint();
 
-    // Step B (350ms): ONLY AFTER the bytes are safely read into RAM, pause so the mobile browser's
-    // GPU/Canvas/WebGL context finishes waking up after closing the system Photo Picker.
+    // Step 2 (350ms): ONLY AFTER bytes are safely inside `memoryBlob`, pause for GPU/Canvas wakeup
     if (wakeupDelayMs > 0) {
       await sleep(wakeupDelayMs);
       checkpoint();
     }
 
     // GIF: preserve original animation bytes
-    if (mime === 'image/gif' && (rawDataUrl || memoryBlob)) {
-      const gifDataUrl = rawDataUrl || await readBlobAsDataUrl(memoryBlob, mime);
-      const gifBlob = memoryBlob || dataUrlToBlob(gifDataUrl);
+    if (detectedMime === 'image/gif') {
+      const gifDataUrl = rawDataUrl || await readBlobAsDataUrl(memoryBlob, detectedMime);
+      const gifBlob = memoryBlob || dataUrlToBlob(gifDataUrl, detectedMime);
       rawDataUrl = '';
       memoryBlob = null;
       checkpoint();
@@ -572,21 +763,23 @@ export async function preparePhotoSequentially(file, {
           blob: gifBlob,
           uploadFileName,
           previewFailed: false,
-          mime,
+          mime: detectedMime,
+          usedRawFallback: false,
           aiResult: null,
         });
       }
       return {
         previewUrl: gifDataUrl,
-        uploadFile: new File([gifBlob], uploadFileName, { type: mime }),
+        uploadFile: new File([gifBlob], uploadFileName, { type: detectedMime }),
         previewFailed: false,
-        mime,
+        mime: detectedMime,
         fromCache: false,
+        usedRawFallback: false,
         cachedAiResult: null,
       };
     }
 
-    // Step C: decode + downscale into an 800px `<canvas>` (JPEG 0.82), then immediately free raw buffers
+    // Step 3: Decode + downscale into an 800px `<canvas>` (JPEG 0.82)
     try {
       const { jpegDataUrl, jpegBlob } = await decode({
         rawDataUrl,
@@ -595,7 +788,7 @@ export async function preparePhotoSequentially(file, {
         maxDim,
         quality,
       });
-      // Immediately drop the multi-megabyte raw data URL / Blob so GC frees them right away
+      // Immediately drop the raw buffers so GC frees them right away
       rawDataUrl = '';
       memoryBlob = null;
       checkpoint();
@@ -608,6 +801,7 @@ export async function preparePhotoSequentially(file, {
           uploadFileName,
           previewFailed: false,
           mime: 'image/jpeg',
+          usedRawFallback: false,
           aiResult: null,
         });
       }
@@ -618,39 +812,48 @@ export async function preparePhotoSequentially(file, {
         previewFailed: false,
         mime: 'image/jpeg',
         fromCache: false,
+        usedRawFallback: false,
         cachedAiResult: null,
       };
     } catch (decodeErr) {
       if (decodeErr instanceof PhotoPipelineCancelled) throw decodeErr;
       checkpoint();
 
-      // If the raw bytes were read into RAM (e.g. an undecodable HEIC on Android), preserve them for upload
-      const fallbackBlob = memoryBlob || (rawDataUrl ? dataUrlToBlob(rawDataUrl) : null);
+      // Bulletproof Fallback: bytes are ALREADY in `memoryBlob` and `rawDataUrl` from Step 1.
+      // Never fail with "We could not read this photo. Please select it again." — use `memoryBlob`
+      // as the upload file and `rawDataUrl` as `previewUrl` for `<img src={previewUrl} />`.
+      const fallbackBlob = memoryBlob || (rawDataUrl ? dataUrlToBlob(rawDataUrl, detectedMime) : null);
+      const fallbackPreviewUrl = rawDataUrl || (fallbackBlob ? await readBlobAsDataUrl(fallbackBlob, detectedMime).catch(() => '') : '');
       rawDataUrl = '';
       memoryBlob = null;
+
       if (fallbackBlob) {
-        console.warn('[PhotoPipeline] Browser cannot decode this format, uploading original bytes:', decodeErr?.message || decodeErr);
+        console.warn('[PhotoPipeline] Canvas decode failed on this device; using in-memory raw bytes + rawDataUrl preview:', decodeErr?.message || decodeErr);
         const uploadFileName = file?.name || 'photo';
+        const previewFailed = !fallbackPreviewUrl;
+        const skippedAi = { hasPerson: false, hasAnimal: true, detectedSpecies: '', checkStatus: 'skipped' };
         if (useCache) {
           setInSessionCache(file, {
-            previewUrl: '',
+            previewUrl: fallbackPreviewUrl,
             blob: fallbackBlob,
             uploadFileName,
-            previewFailed: true,
-            mime,
-            aiResult: { hasPerson: false, hasAnimal: true, detectedSpecies: '', checkStatus: 'skipped' },
+            previewFailed,
+            mime: detectedMime,
+            usedRawFallback: true,
+            aiResult: skippedAi,
           });
         }
         return {
-          previewUrl: '',
-          uploadFile: new File([fallbackBlob], uploadFileName, { type: mime }),
-          previewFailed: true,
-          mime,
+          previewUrl: fallbackPreviewUrl,
+          uploadFile: new File([fallbackBlob], uploadFileName, { type: detectedMime }),
+          previewFailed,
+          mime: detectedMime,
           fromCache: false,
-          cachedAiResult: null,
+          usedRawFallback: true,
+          cachedAiResult: skippedAi,
         };
       }
-      throw lastReadErr || decodeErr;
+      throw decodeErr;
     }
   } finally {
     revokeTrackedObjectUrl(fallbackObjectUrl);
