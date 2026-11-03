@@ -3,9 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useChainId, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useSwitchChain, usePublicClient } from 'wagmi';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { formatEther, decodeEventLog } from 'viem';
-import { baseSepolia } from 'viem/chains';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress, getExplorerUrl } from '../config/chains';
+import { getContractAddress, getExplorerUrl, ACTIVE_CHAIN, ACTIVE_NETWORK_NAME, IS_MAINNET } from '../config/chains';
 import {
   uploadToArweave, uploadJsonToArweave, buildNftMetadata,
 } from '../utils/arweave';
@@ -29,6 +28,7 @@ import {
   PhotoPipelineCancelled,
   PREVIEW_MAX_DIMENSION,
   PREVIEW_JPEG_QUALITY,
+  MAX_ARWEAVE_FREE_PHOTO_BYTES,
   CACHED_OVERLAY_DELAY_MS,
   revokeAllTrackedObjectUrls,
   cachePhotoAiResult,
@@ -63,9 +63,11 @@ const MAX_PET_NAME_BYTES = 128;                // Vyper String[128] limits UTF-8
 const MIN_YEAR = 1900;
 const GAS_BUFFER_WEI = 50_000_000_000_000n;    // 0.00005 ETH fallback gas reserve when estimation is unavailable
 const ARWEAVE_URI_PLACEHOLDER = 'x'.repeat(43); // Same length as a real Arweave tx id (used for pre-upload gas estimation)
-const INSUFFICIENT_FUNDS_MESSAGE = 'Insufficient Base Sepolia ETH to cover the creation fee plus network fees. Top up your wallet from a faucet and try again.';
+const INSUFFICIENT_FUNDS_MESSAGE = IS_MAINNET
+  ? `Insufficient ${ACTIVE_NETWORK_NAME} ETH to cover the creation fee plus network fees. Please top up your wallet and try again.`
+  : `Insufficient ${ACTIVE_NETWORK_NAME} ETH to cover the creation fee plus network fees. Top up your wallet from a faucet and try again.`;
 const UNCONFIRMED_TX_MESSAGE = 'We could not confirm the transaction yet. It may still succeed — please check the block explorer before retrying.';
-const EXPLORER_BASE_URL = getExplorerUrl(baseSepolia.id);
+const EXPLORER_BASE_URL = getExplorerUrl(ACTIVE_CHAIN.id);
 
 function getUtf8ByteLength(value) {
   return new TextEncoder().encode(value || '').length;
@@ -154,8 +156,8 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
   if (!file || file.type === 'image/gif') return file;
   const isImage = Boolean(file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name || ''));
   if (!isImage) return file;
-  // Small files under 1.5 MB don't require downscaling
-  if (file.size <= 1.5 * 1024 * 1024) return file;
+  // Files already compressed under the 95 KB free Arweave ANS-104 limit don't require downscaling
+  if (file.size <= MAX_ARWEAVE_FREE_PHOTO_BYTES) return file;
 
   let bitmap = null;
   let img = null;
@@ -189,7 +191,7 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
 
     if (!width || !height) return file;
     const scale = Math.min(1, maxWidth / width, maxHeight / height);
-    if (scale >= 1 && file.size <= 2 * 1024 * 1024) return file;
+    if (scale >= 1 && file.size <= MAX_ARWEAVE_FREE_PHOTO_BYTES) return file;
 
     canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(width * scale));
@@ -200,7 +202,11 @@ async function resizeImage(file, maxWidth = MAX_IMAGE_DIMENSION, maxHeight = MAX
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    let blob = null;
+    for (const q of [quality, 0.72, 0.62, 0.52]) {
+      blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', q));
+      if (blob && blob.size <= MAX_ARWEAVE_FREE_PHOTO_BYTES) break;
+    }
     if (!blob || blob.size >= file.size) return file;
     const name = (file.name || 'photo').replace(/\.[^.]+$/, '');
     return new File([blob], `${name}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
@@ -387,7 +393,7 @@ export default function CreateMemorial() {
   const navigate = useNavigate();
   const contractAddress = getContractAddress(chainId);
   const { switchChainAsync } = useSwitchChain();
-  const publicClient = usePublicClient({ chainId: baseSepolia.id });
+  const publicClient = usePublicClient({ chainId: ACTIVE_CHAIN.id });
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   const externalWallet = wallets.find((w) => w.walletClientType !== 'privy');
@@ -540,7 +546,7 @@ export default function CreateMemorial() {
     error: receiptError,
     data: receipt,
     refetch: refetchReceipt,
-  } = useWaitForTransactionReceipt({ hash: txHash, chainId: baseSepolia.id });
+  } = useWaitForTransactionReceipt({ hash: txHash, chainId: ACTIVE_CHAIN.id });
 
   // Decode created memorial tokenId from transaction logs
   const createdTokenId = useMemo(() => {
@@ -1128,21 +1134,21 @@ export default function CreateMemorial() {
       fallbackChainId: chainId,
     });
 
-    // Only call switchChain if the wallet is confirmed to be on a network other than Base Sepolia (84532)
-    if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
+    // Only call switchChain if the wallet is confirmed to be on a network other than ACTIVE_CHAIN
+    if (currentWalletChainId !== null && currentWalletChainId !== ACTIVE_CHAIN.id) {
       try {
         if (preferredWallet?.walletClientType === 'privy' || !connector) {
           if (preferredWallet?.switchChain) {
-            await preferredWallet.switchChain(baseSepolia.id);
+            await preferredWallet.switchChain(ACTIVE_CHAIN.id);
           }
         } else if (switchChainAsync && connector) {
-          await switchChainAsync({ chainId: baseSepolia.id });
+          await switchChainAsync({ chainId: ACTIVE_CHAIN.id });
         } else if (preferredWallet?.switchChain) {
-          await preferredWallet.switchChain(baseSepolia.id);
+          await preferredWallet.switchChain(ACTIVE_CHAIN.id);
         }
       } catch (switchErr) {
         console.error('[CreateMemorial] Failed to switch network:', switchErr);
-        return formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia to continue.');
+        return formatTxError(switchErr, `Please switch your wallet network to ${ACTIVE_NETWORK_NAME} to continue.`);
       }
     }
     return '';
@@ -1161,7 +1167,7 @@ export default function CreateMemorial() {
         functionName: 'create_memorial',
         args: [name, metadataTxId, isPublicFlag],
         value: fee,
-        chainId: baseSepolia.id,
+        chainId: ACTIVE_CHAIN.id,
       },
     });
 
@@ -2329,7 +2335,7 @@ export default function CreateMemorial() {
                   Transaction Submitted
                 </h3>
                 <p className="text-sm text-[#53433e] leading-relaxed font-medium">
-                  Transaction submitted to Base Sepolia. Waiting for confirmation...
+                  Transaction submitted to {ACTIVE_NETWORK_NAME}. Waiting for confirmation...
                 </p>
               </div>
 
@@ -2343,7 +2349,7 @@ export default function CreateMemorial() {
                   </span>
                 </div>
                 <a
-                  href={`https://sepolia.basescan.org/tx/${txHash}`}
+                  href={`${EXPLORER_BASE_URL}/tx/${txHash}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs font-mono text-[#8a4f36] hover:underline break-all group"

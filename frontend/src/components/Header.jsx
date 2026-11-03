@@ -4,7 +4,7 @@ import BrandLogo from './BrandLogo';
 import { usePrivy, useWallets, useFundWallet } from '@privy-io/react-auth';
 import { useSetActiveWallet } from '@privy-io/wagmi';
 import { useAccount, useDisconnect } from 'wagmi';
-import { baseSepolia } from 'viem/chains';
+import { ACTIVE_CHAIN, ACTIVE_NETWORK_NAME } from '../config/chains';
 import {
   isMobileWithoutEthereum,
   getMetaMaskDappDeepLink,
@@ -201,7 +201,7 @@ export default function Header() {
     burgerButtonRef.current?.blur();
   }, [authenticated, isUserAuthenticated, menuOpen]);
 
-  const networkName = 'Base Sepolia';
+  const networkName = ACTIVE_NETWORK_NAME;
   const truncate = (addr) => addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : '';
 
   const handleShowPrivyWallet = async () => {
@@ -209,7 +209,7 @@ export default function Header() {
       try {
         await fundWallet({
           address: displayAddress,
-          options: { chain: baseSepolia },
+          options: { chain: ACTIVE_CHAIN },
         });
       } catch (err) {
         console.error('Fund wallet error:', err);
@@ -223,7 +223,7 @@ export default function Header() {
         await fundWallet({
           address: displayAddress,
           options: {
-            chain: baseSepolia,
+            chain: ACTIVE_CHAIN,
             amount: '0.008',
             asset: 'native-currency',
           },

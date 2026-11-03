@@ -28,7 +28,8 @@
 export const PHOTO_WAKEUP_DELAY_MS = 350;      // Step 2: let mobile GPU/Canvas wake up after bytes are in RAM
 export const DECODE_RETRY_DELAY_MS = 400;      // Pause before the single Image() decode retry
 export const PREVIEW_MAX_DIMENSION = 800;      // Max 800px longest side for preview & upload
-export const PREVIEW_JPEG_QUALITY = 0.82;      // Compact 0.82 JPEG quality (~70-100 KB)
+export const PREVIEW_JPEG_QUALITY = 0.82;      // Compact 0.82 JPEG quality (~70-95 KB)
+export const MAX_ARWEAVE_FREE_PHOTO_BYTES = 95_000; // <= 95 KB so ANS-104 DataItem + tags stays under Turbo's 100 KB free limit
 export const MAX_SESSION_CACHE_ENTRIES = 10;   // Up to 10 entries in sessionPhotoCache
 export const CACHED_OVERLAY_DELAY_MS = 800;    // 800ms "Preparing Portrait..." overlay on session cache hit
 
@@ -422,9 +423,28 @@ export function loadImageElement(src, timeoutMs = 10000) {
 }
 
 /**
+ * Encodes a 2D `<canvas>` to `{ jpegDataUrl, jpegBlob }` at the given quality.
+ */
+async function encodeCanvasToJpeg(canvas, quality) {
+  const jpegDataUrl = canvas.toDataURL('image/jpeg', quality);
+  if (!jpegDataUrl || !jpegDataUrl.startsWith('data:image/jpeg;base64,')) {
+    throw new Error('Canvas produced an empty JPEG');
+  }
+  let jpegBlob = null;
+  if (typeof canvas.toBlob === 'function') {
+    jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+  }
+  if (!jpegBlob) {
+    jpegBlob = dataUrlToBlob(jpegDataUrl, 'image/jpeg');
+  }
+  return { jpegDataUrl, jpegBlob };
+}
+
+/**
  * Step C: decode the already-read in-memory image (`rawDataUrl` or `memoryBlob`, falling back to
  * `createImageBitmap` / `objectUrl` / `fallbackObjectUrl`), downscale onto a max 800px `<canvas>`,
- * export compact `jpegDataUrl` (0.82) + `jpegBlob` (0.82), and immediately zero the canvas in `finally`.
+ * export compact `jpegDataUrl` + `jpegBlob` guaranteed `<= maxBytes` (95_000 bytes for ArDrive Turbo's
+ * free 100 KB ANS-104 bundler limit), and immediately zero every canvas in `finally`.
  */
 export async function renderToJpeg({
   rawDataUrl = '',
@@ -432,12 +452,14 @@ export async function renderToJpeg({
   fallbackObjectUrl = '',
   maxDim = PREVIEW_MAX_DIMENSION,
   quality = PREVIEW_JPEG_QUALITY,
+  maxBytes = MAX_ARWEAVE_FREE_PHOTO_BYTES,
   retryDelayMs = DECODE_RETRY_DELAY_MS,
 }) {
   let img = null;
   let bitmap = null;
   let objectUrl = '';
   let canvas = null;
+  let scaledCanvas = null;
   try {
     let lastDecodeErr = null;
     if (rawDataUrl) {
@@ -510,26 +532,61 @@ export async function renderToJpeg({
     objectUrl = '';
     revokeTrackedObjectUrl(fallbackObjectUrl);
 
-    const jpegDataUrl = canvas.toDataURL('image/jpeg', quality);
-    if (!jpegDataUrl || !jpegDataUrl.startsWith('data:image/jpeg;base64,')) {
-      throw new Error('Canvas produced an empty JPEG');
+    let { jpegDataUrl, jpegBlob } = await encodeCanvasToJpeg(canvas, quality);
+    let outWidth = canvas.width;
+    let outHeight = canvas.height;
+
+    // Guarantee `jpegBlob.size <= maxBytes` (95,000 bytes) for ArDrive Turbo free ANS-104 uploads:
+    // 1) First step down JPEG quality on the current canvas (0.72 -> 0.62 -> 0.52)
+    if (maxBytes > 0 && jpegBlob.size > maxBytes) {
+      const fallbackQualities = [0.72, 0.62, 0.52].filter((q) => q < quality);
+      for (const nextQuality of fallbackQualities) {
+        const candidate = await encodeCanvasToJpeg(canvas, nextQuality);
+        jpegDataUrl = candidate.jpegDataUrl;
+        jpegBlob = candidate.jpegBlob;
+        if (jpegBlob.size <= maxBytes) break;
+      }
     }
 
-    let jpegBlob = null;
-    if (typeof canvas.toBlob === 'function') {
-      jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
-    }
-    if (!jpegBlob) {
-      jpegBlob = dataUrlToBlob(jpegDataUrl, 'image/jpeg');
+    // 2) If still > maxBytes (e.g. high-frequency foliage/fur texture), step down dimensions (720px -> 640px -> 560px -> 480px)
+    if (maxBytes > 0 && jpegBlob.size > maxBytes) {
+      const longestCurrent = Math.max(canvas.width, canvas.height);
+      const smallerDims = [720, 640, 560, 480].filter((d) => d < longestCurrent);
+      for (const targetDim of smallerDims) {
+        const subScale = targetDim / longestCurrent;
+        scaledCanvas = document.createElement('canvas');
+        scaledCanvas.width = Math.max(1, Math.round(canvas.width * subScale));
+        scaledCanvas.height = Math.max(1, Math.round(canvas.height * subScale));
+        const subCtx = scaledCanvas.getContext('2d');
+        if (!subCtx) {
+          releaseCanvas(scaledCanvas);
+          scaledCanvas = null;
+          break;
+        }
+        subCtx.fillStyle = '#ffffff';
+        subCtx.fillRect(0, 0, scaledCanvas.width, scaledCanvas.height);
+        subCtx.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+
+        for (const subQuality of [0.72, 0.62, 0.50]) {
+          const candidate = await encodeCanvasToJpeg(scaledCanvas, subQuality);
+          jpegDataUrl = candidate.jpegDataUrl;
+          jpegBlob = candidate.jpegBlob;
+          outWidth = scaledCanvas.width;
+          outHeight = scaledCanvas.height;
+          if (jpegBlob.size <= maxBytes) break;
+        }
+        releaseCanvas(scaledCanvas);
+        scaledCanvas = null;
+        if (jpegBlob.size <= maxBytes) break;
+      }
     }
 
-    const outWidth = canvas.width;
-    const outHeight = canvas.height;
     releaseCanvas(canvas);
     canvas = null;
 
     return { jpegDataUrl, jpegBlob, width: outWidth, height: outHeight };
   } finally {
+    releaseCanvas(scaledCanvas);
     releaseCanvas(canvas);
     if (bitmap && typeof bitmap.close === 'function') {
       try { bitmap.close(); } catch {}
@@ -701,6 +758,7 @@ export async function preparePhotoSequentially(file, {
   isCurrent = () => true,
   maxDim = PREVIEW_MAX_DIMENSION,
   quality = PREVIEW_JPEG_QUALITY,
+  maxBytes = MAX_ARWEAVE_FREE_PHOTO_BYTES,
   wakeupDelayMs = PHOTO_WAKEUP_DELAY_MS,
   useCache = true,
   decode = renderToJpeg,
@@ -779,15 +837,40 @@ export async function preparePhotoSequentially(file, {
       };
     }
 
-    // Step 3: Decode + downscale into an 800px `<canvas>` (JPEG 0.82)
+    // Step 3: Decode + downscale into an 800px `<canvas>` (JPEG <= 95 KB)
     try {
-      const { jpegDataUrl, jpegBlob } = await decode({
+      let decoded = await decode({
         rawDataUrl,
         memoryBlob,
         fallbackObjectUrl,
         maxDim,
         quality,
+        maxBytes,
       });
+      if (maxBytes > 0 && decoded.jpegBlob && decoded.jpegBlob.size > maxBytes) {
+        const stepPlans = [
+          { dim: maxDim, q: 0.72 },
+          { dim: maxDim, q: 0.62 },
+          { dim: 720, q: 0.72 },
+          { dim: 720, q: 0.62 },
+          { dim: 640, q: 0.62 },
+          { dim: 560, q: 0.52 },
+        ];
+        for (const plan of stepPlans) {
+          if (plan.dim >= maxDim && plan.q >= quality) continue;
+          const next = await decode({
+            rawDataUrl,
+            memoryBlob,
+            fallbackObjectUrl,
+            maxDim: plan.dim,
+            quality: plan.q,
+            maxBytes,
+          });
+          decoded = next;
+          if (decoded.jpegBlob && decoded.jpegBlob.size <= maxBytes) break;
+        }
+      }
+      const { jpegDataUrl, jpegBlob } = decoded;
       // Immediately drop the raw buffers so GC frees them right away
       rawDataUrl = '';
       memoryBlob = null;

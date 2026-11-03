@@ -3,6 +3,7 @@ script/deploy.py — Production-grade deployment script for Base L2.
 Executes pre-flight bytecode verification, contract deployment,
 smoke tests, and initiates 2-step ownership transfer to Gnosis Safe.
 """
+import os
 import boa
 from moccasin.config import get_active_network
 from src import ModerationModule, MemoryChainCore
@@ -10,6 +11,9 @@ from src import ModerationModule, MemoryChainCore
 # Начальные экономические параметры (Base L2)
 INITIAL_CANDLE_PRICE = 100_000_000_000_000  # 0.0001 ETH
 INITIAL_CREATION_FEE = 100_000_000_000_000  # 0.0001 ETH
+
+DEFAULT_SAFE_MULTISIG = "0x7D29Ae44D5041b59012e784818446088774305F5"
+SEPOLIA_MODERATION_MODULE = "0x7120f05831bab3742b58a0a17e7a9b64789f30f3"
 
 
 def verify_target_contract(target_address: str, label: str):
@@ -34,11 +38,22 @@ def deploy():
         ).address
         print("\n[1/4] Локальный деплой ModerationModule...")
         mod_module_address = ModerationModule.deploy().address
+    elif network.chain_id == 8453 or network.name == "base":
+        # Base Mainnet (Chain ID: 8453)
+        safe_multisig = os.getenv("SAFE_MULTISIG_ADDRESS", DEFAULT_SAFE_MULTISIG).strip()
+        mod_module_address = os.getenv("MODERATION_MODULE_ADDRESS", "").strip()
+        if not mod_module_address or len(boa.env.get_code(str(mod_module_address))) == 0:
+            print("\n[1/4] Деплой ModerationModule в Base Mainnet (8453)...")
+            mod_module_address = ModerationModule.deploy().address
+            print(f"[✓] ModerationModule развернут в Base Mainnet: {mod_module_address}")
     else:
-        # Наш подтверждённый Safe в Base Sepolia
-        safe_multisig = "0x7D29Ae44D5041b59012e784818446088774305F5"
-        # Наш уже задеплоенный ModerationModule
-        mod_module_address = "0x7120f05831bab3742b58a0a17e7a9b64789f30f3"
+        # Base Sepolia (Chain ID: 84532)
+        safe_multisig = os.getenv("SAFE_MULTISIG_ADDRESS", DEFAULT_SAFE_MULTISIG).strip()
+        mod_module_address = os.getenv("MODERATION_MODULE_ADDRESS", SEPOLIA_MODERATION_MODULE).strip()
+        if len(boa.env.get_code(str(mod_module_address))) == 0:
+            print("\n[1/4] Деплой ModerationModule в Base Sepolia...")
+            mod_module_address = ModerationModule.deploy().address
+            print(f"[✓] ModerationModule развернут: {mod_module_address}")
 
     # 1. Pre-flight аудит Safe и Модуля модерации
     verify_target_contract(safe_multisig, "Совет Хранителей (Safe Multisig)")

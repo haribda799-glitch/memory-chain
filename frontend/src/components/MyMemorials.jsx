@@ -10,11 +10,10 @@ import {
   usePublicClient,
   useSwitchChain 
 } from 'wagmi';
-import { baseSepolia } from 'viem/chains';
 import MemorialCard from './MemorialCard';
 import { useMemorials } from '../utils/useMemorials';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress } from '../config/chains';
+import { getContractAddress, ACTIVE_CHAIN, ACTIVE_NETWORK_NAME } from '../config/chains';
 import { useNow } from '../hooks/useNow';
 import { formatTxError } from '../utils/txErrors';
 import {
@@ -117,20 +116,20 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
         fallbackChainId: chainId,
       });
 
-      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
+      if (currentWalletChainId !== null && currentWalletChainId !== ACTIVE_CHAIN.id) {
         try {
           if (activeWallet?.walletClientType === 'privy' || !connector) {
             if (activeWallet?.switchChain) {
-              await activeWallet.switchChain(baseSepolia.id);
+              await activeWallet.switchChain(ACTIVE_CHAIN.id);
             }
           } else if (switchChainAsync && connector) {
-            await switchChainAsync({ chainId: baseSepolia.id });
+            await switchChainAsync({ chainId: ACTIVE_CHAIN.id });
           } else if (activeWallet?.switchChain) {
-            await activeWallet.switchChain(baseSepolia.id);
+            await activeWallet.switchChain(ACTIVE_CHAIN.id);
           }
         } catch (switchErr) {
           console.error('Failed to switch network:', switchErr);
-          alert(formatTxError(switchErr, 'Please switch to Base Sepolia in your wallet.'));
+          alert(formatTxError(switchErr, `Please switch to ${ACTIVE_NETWORK_NAME} in your wallet.`));
           return;
         }
       }
@@ -154,7 +153,7 @@ function MyMemorialItem({ mem, now, onRefetch, onUpdateMemorial }) {
           abi: CONTRACT_ABI,
           functionName: 'toggle_public',
           args: [BigInt(mem.tokenId)],
-          chainId: baseSepolia.id,
+          chainId: ACTIVE_CHAIN.id,
           ...gasConfig,
         },
       });

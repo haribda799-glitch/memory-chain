@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useReadContract, useWriteContract, useEstimateFeesPerGas, useChainId, usePublicClient, useAccount, useSwitchChain, useBalance } from 'wagmi';
 import { parseEther, formatEther } from 'viem';
-import { baseSepolia } from 'viem/chains';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress, getExplorerUrl } from '../config/chains';
+import { getContractAddress, getExplorerUrl, ACTIVE_CHAIN, ACTIVE_NETWORK_NAME } from '../config/chains';
 import { formatTxError, isUserRejection } from '../utils/txErrors';
 import {
   getActiveWalletChainId,
@@ -186,7 +185,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
     handleClose();
   };
 
-  /** Make sure the connected wallet is on Base Sepolia before sending anything. */
+  /** Make sure the connected wallet is on the active Base chain before sending anything. */
   const ensureBaseSepolia = async () => {
     const activeWallet = resolveActivePrivyWallet(wallets, activeAddress);
     const currentWalletChainId = await getActiveWalletChainId({
@@ -196,26 +195,26 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
       connector,
       fallbackChainId: chainId,
     });
-    // If already on Base Sepolia (84532), do NOT call switchChainAsync
-    if (currentWalletChainId === null || currentWalletChainId === baseSepolia.id) {
+    // If already on ACTIVE_CHAIN, do NOT call switchChainAsync
+    if (currentWalletChainId === null || currentWalletChainId === ACTIVE_CHAIN.id) {
       return true;
     }
     try {
       if (activeWallet?.walletClientType === 'privy' || !isConnected || !connector) {
         if (activeWallet?.switchChain) {
-          await activeWallet.switchChain(baseSepolia.id);
+          await activeWallet.switchChain(ACTIVE_CHAIN.id);
         }
       } else if (isConnected && connector && switchChainAsync) {
-        await switchChainAsync({ chainId: baseSepolia.id });
+        await switchChainAsync({ chainId: ACTIVE_CHAIN.id });
       } else if (activeWallet?.switchChain) {
-        await activeWallet.switchChain(baseSepolia.id);
+        await activeWallet.switchChain(ACTIVE_CHAIN.id);
       }
       return true;
     } catch (switchErr) {
       console.error('[Candle] Failed to switch network:', switchErr);
       setError(isUserRejection(switchErr)
-        ? 'Network switch was cancelled. Please switch your wallet to Base Sepolia to continue.'
-        : 'Please switch your wallet network to Base Sepolia to continue.');
+        ? `Network switch was cancelled. Please switch your wallet to ${ACTIVE_NETWORK_NAME} to continue.`
+        : `Please switch your wallet network to ${ACTIVE_NETWORK_NAME} to continue.`);
       return false;
     }
   };
@@ -237,7 +236,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
     }
 
     if (isInsufficientFunds) {
-      setError('Insufficient Base Sepolia ETH balance for this offering.');
+      setError(`Insufficient ${ACTIVE_NETWORK_NAME} ETH balance for this offering.`);
       return;
     }
 
@@ -303,7 +302,7 @@ export default function LightCandleModal({ isOpen = false, onClose = () => {}, m
         abi: CONTRACT_ABI,
         functionName: isTierMode ? 'light_candle' : 'donate_and_light',
         args: isTierMode ? [BigInt(memorialId || 0), Number(selectedTier)] : [BigInt(memorialId || 0)],
-        chainId: baseSepolia.id,
+        chainId: ACTIVE_CHAIN.id,
         value: requiredWei,
         maxFeePerGas,
         maxPriorityFeePerGas,

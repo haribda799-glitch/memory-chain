@@ -426,7 +426,7 @@ export default function MemorialPage() {
   // Resolve image: handle ar:// URI scheme from production mints
   const rawImage = metadata?.image || '';
   const imageUrl = rawImage.startsWith('ar://')
-    ? `https://arweave.net/${rawImage.slice(5)}`
+    ? getArweaveUrl(rawImage)
     : rawImage;
 
   const attributes  = metadata?.attributes  || [];

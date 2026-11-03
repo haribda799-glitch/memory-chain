@@ -1,49 +1,50 @@
 // ============================================================
-// Memory Chain — Arweave Upload Utilities
+// Memory Chain — Permanent Arweave Upload via ANS-104 + ArDrive Turbo
 // ============================================================
-// MOCK_MODE = true  → instant fake txIds, no network required
-// MOCK_MODE = false → real ArLocal (DEV) or arweave.net (PROD)
 //
-// Automatic fallback: if ArConnect is missing (PROD) or ArLocal is
-// unreachable (DEV), uploads silently switch to local mock storage
-// (console warning only) so MetaMask / Privy users can still mint.
-//
-// DEV (ArLocal) upload flow:
-//   1. Generate a fresh JWK wallet
-//   2. Mint 10 000 AR of test tokens via /mint endpoint
-//   3. Create → sign → upload via chunked Uploader API
-//   4. Verify tx.id is non-empty (throw if not)
-//   5. Mine the block via /mine
-//   6. Confirm tx status (throw on failure)
-//
-// Any throw from a real upload cancels the mint flow in CreateMemorial.jsx
+// How permanent Arweave uploads work in Memory Chain (Testnet & Mainnet):
+// 1. Photos are downscaled & compressed by `photoPipeline.js` (and guarded here) to `<= 95_000` bytes
+//    (~95 KB), and NFT metadata JSON is ~1 KB.
+// 2. ArDrive Turbo (`https://upload.ardrive.io/v1/tx`) subsidizes 100% of signed ANS-104 DataItems
+//    under 100 KB (`winc = 0`, 0 credits required).
+// 3. In the browser, `createAndSignAns104DataItem` generates an ephemeral secp256k1 keypair
+//    (`SignatureType = 3`, Ethereum ANS-104), serializes the Arweave tags in Apache Avro zig-zag
+//    binary format, computes the SHA-384 Arweave `deepHash` over the 8-part ANS-104 tuple, signs it
+//    with EIP-191 (`personal_sign`), and POSTs the binary DataItem to `https://upload.ardrive.io/v1/tx`.
+// 4. Every memorial receives a real, permanent 43-character Arweave transaction ID (`ar://<txId>`)
+//    that resolves on ANY device worldwide via `https://turbo-gateway.com/<txId>` (instant 0s cache)
+//    and `https://arweave.net/<txId>` (L1 settlement), with `localStorage` used ONLY as an instant
+//    0ms optimistic cache on the creator's device right after minting.
 // ============================================================
 
 import Arweave from 'arweave';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { hexToBytes } from 'viem';
 
 const ArweaveClass = Arweave.default || Arweave;
 
 export const arweave = ArweaveClass.init({
-  host: import.meta.env.DEV ? '127.0.0.1' : 'arweave.net',
-  port: import.meta.env.DEV ? 1984 : 443,
-  protocol: import.meta.env.DEV ? 'http' : 'https',
+  host: 'arweave.net',
+  port: 443,
+  protocol: 'https',
 });
 
-export const MOCK_MODE = false; // Set true to force mock uploads (no network required)
+export const MOCK_MODE = false;
+export const TURBO_UPLOAD_URL = 'https://upload.ardrive.io/v1/tx';
+export const TURBO_FREE_MAX_BYTES = 100 * 1024; // 100 KB free ANS-104 limit on ArDrive Turbo
+export const MAX_TURBO_PHOTO_BYTES = 95_000;    // <= 95 KB target for image payload
 
-const ARWEAVE_GATEWAY = import.meta.env.DEV
-  ? 'http://127.0.0.1:1984'
-  : 'https://arweave.net';
+// Primary gateway (`turbo-gateway.com`) serves ANS-104 DataItems at 0ms immediately after upload
+// AND serves all settled Arweave L1 transactions; `arweave.net` is the L1 fallback gateway.
+export const ARWEAVE_GATEWAY = 'https://turbo-gateway.com';
+export const ARWEAVE_L1_GATEWAY = 'https://arweave.net';
 
-// ── Mock storage (graceful fallback) ─────────────────────────
-// Used automatically when MOCK_MODE is on, ArConnect is missing (PROD),
-// or ArLocal is unreachable (DEV). Mock IDs are `mock_` + 38 chars = 43 chars,
-// which fits the contract's `arweave_uri: String[64]` limit.
-// Metadata JSON is persisted in localStorage and served back as a data: URL
-// by getArweaveUrl(), so the creator's browser renders photo + story normally.
+// ── Optimistic cache (0ms local read right after minting) + Legacy mock support ──
 const MOCK_PREFIX = 'mock_';
 const MOCK_STORAGE_PREFIX = 'mc_mock_ar_';
-const mockMemoryStore = new Map(); // mockId → data URL / JSON string (session cache)
+const OPTIMISTIC_STORAGE_PREFIX = 'mc_opt_ar_';
+const mockMemoryStore = new Map();       // legacy mockId -> data URL / JSON string
+const optimisticMemoryStore = new Map(); // real Arweave txId -> data URL / JSON string
 
 export function isMockTxId(txId) {
   return typeof txId === 'string' && txId.startsWith(MOCK_PREFIX);
@@ -66,6 +67,56 @@ const MOCK_PLACEHOLDER_METADATA = JSON.stringify({
   temporaryStorageNotice: TESTNET_TEMPORARY_STORAGE_NOTICE,
 });
 
+/** Extracts the raw 43-char Arweave txId from `ar://...`, `https://arweave.net/...`, or plain ID. */
+export function extractArweaveTxId(uriOrId) {
+  if (!uriOrId) return '';
+  const clean = String(uriOrId).trim();
+  if (clean.startsWith('data:')) return '';
+  if (clean.startsWith('ar://')) return clean.slice(5).trim();
+  const gatewayMatch = clean.match(/^https?:\/\/(?:[\w-]+\.)?(?:arweave\.net|turbo-gateway\.com|ar-io\.dev)\/([A-Za-z0-9_-]{43})/i);
+  if (gatewayMatch) return gatewayMatch[1];
+  return clean;
+}
+
+function getOptimisticCacheEntry(txId) {
+  if (!txId) return '';
+  const mem = optimisticMemoryStore.get(txId);
+  if (mem) return mem;
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      return window.localStorage.getItem(`${OPTIMISTIC_STORAGE_PREFIX}${txId}`) || '';
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function setOptimisticCacheEntry(txId, value) {
+  if (!txId || !value) return;
+  optimisticMemoryStore.set(txId, value);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(`${OPTIMISTIC_STORAGE_PREFIX}${txId}`, value);
+    } catch {
+      // If localStorage is full, prune older optimistic cache entries (`mc_opt_ar_*`) and retry once
+      try {
+        const keysToRemove = [];
+        for (let i = 0; i < window.localStorage.length; i += 1) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith(OPTIMISTIC_STORAGE_PREFIX)) keysToRemove.push(k);
+        }
+        keysToRemove.slice(0, Math.ceil(keysToRemove.length / 2)).forEach((k) => {
+          try { window.localStorage.removeItem(k); } catch {}
+        });
+        window.localStorage.setItem(`${OPTIMISTIC_STORAGE_PREFIX}${txId}`, value);
+      } catch {
+        // In-memory optimisticMemoryStore still holds the entry for this session
+      }
+    }
+  }
+}
+
 function resolveMockUrl(txId) {
   let stored = mockMemoryStore.get(txId);
   if (!stored && typeof window !== 'undefined' && window.localStorage) {
@@ -82,70 +133,47 @@ function resolveMockUrl(txId) {
 }
 
 /**
- * Returns a fetchable URL for an Arweave transaction ID.
- * Mock IDs resolve to a local data: URL instead of the gateway.
+ * Returns a fetchable URL for an Arweave transaction ID or `ar://` URI.
+ * - Checks the local optimistic cache first (0ms after minting while gateways index the tx).
+ * - Handles legacy `mock_...` IDs for older testnet memorials.
+ * - Otherwise returns the permanent gateway URL (`https://turbo-gateway.com/<txId>`).
  */
-export function getArweaveUrl(txId) {
+export function getArweaveUrl(txId, { preferGateway = false } = {}) {
   if (!txId) return '';
   const clean = String(txId).trim();
-  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:')) {
+  if (clean.startsWith('data:')) return clean;
+
+  const normalizedId = extractArweaveTxId(clean);
+  if (!normalizedId) return clean;
+
+  if (isMockTxId(normalizedId)) return resolveMockUrl(normalizedId);
+
+  if (!preferGateway) {
+    const cached = getOptimisticCacheEntry(normalizedId);
+    if (cached) {
+      return cached.startsWith('data:') ? cached : jsonToDataUrl(cached);
+    }
+  }
+
+  if (clean.startsWith('http://') || clean.startsWith('https://')) {
+    // Rewrite arweave.net/<txId> to primary gateway so freshly uploaded ANS-104 items resolve at 0s
+    if (/^https?:\/\/arweave\.net\/[A-Za-z0-9_-]{43}$/i.test(clean)) {
+      return `${ARWEAVE_GATEWAY}/${normalizedId}`;
+    }
     return clean;
   }
-  const normalizedId = clean.startsWith('ar://') ? clean.slice(5) : clean;
-  if (isMockTxId(normalizedId)) return resolveMockUrl(normalizedId);
+
   return `${ARWEAVE_GATEWAY}/${normalizedId}`;
 }
 
-/**
- * Generate a random mock transaction ID (43 chars, `mock_` prefixed).
- */
-function generateMockTxId() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  let result = MOCK_PREFIX;
-  for (let i = 0; i < 43 - MOCK_PREFIX.length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-
-/**
- * Decide once per session whether real Arweave uploads are possible.
- * Never throws — falls back to 'mock' with a console warning.
- *
- * @returns {Promise<'arweave'|'mock'>}
- */
-let storageModePromise = null;
-export function resolveStorageMode() {
-  if (!storageModePromise) {
-    storageModePromise = (async () => {
-      if (MOCK_MODE) {
-        console.warn('[Arweave] MOCK_MODE enabled — using mock storage.');
-        return 'mock';
-      }
-      if (import.meta.env.DEV) {
-        try {
-          const res = await arweave.api.get('/info');
-          if (res.status === 200) return 'arweave';
-          console.warn(`[ArLocal] /info returned HTTP ${res.status} — falling back to mock storage.`);
-        } catch (err) {
-          console.warn('[ArLocal] Not reachable on port 1984 — falling back to mock storage.', err?.message || err);
-        }
-        return 'mock';
-      }
-      if (typeof window === 'undefined' || !window.arweaveWallet) {
-        console.warn('[Arweave] ArConnect extension not found — falling back to mock storage (testnet).');
-        return 'mock';
-      }
-      return 'arweave';
-    })();
-  }
-  return storageModePromise;
+/** Returns the direct L1 `https://arweave.net/<txId>` URL for explorer links or secondary fallback. */
+export function getArweaveFallbackUrl(txId) {
+  const normalizedId = extractArweaveTxId(txId);
+  if (!normalizedId || isMockTxId(normalizedId)) return '';
+  return `${ARWEAVE_L1_GATEWAY}/${normalizedId}`;
 }
 
 // ── Per-memorial epitaph cache ───────────────────────────────
-// The user's story is cached under `mc_epitaph_tx_<metadataTxId>` (the metadata tx id is the value stored
-// on-chain as the memorial's arweave_uri), so memorials sharing a pet name never leak stories into each other.
-// The legacy name-keyed entry (`mc_epitaph_<petname lowercase>`) is still written for backward compatibility.
 export const EPITAPH_TX_STORAGE_PREFIX = 'mc_epitaph_tx_';
 
 export function getEpitaphStorageKeyForTx(metadataTxId) {
@@ -153,7 +181,6 @@ export function getEpitaphStorageKeyForTx(metadataTxId) {
 }
 
 function persistEpitaphForTx(metadataTxId, metadata) {
-  // `bio` is only present when the user actually wrote a story (never the generic fallback epitaph)
   const userEpitaph = typeof metadata?.bio === 'string' ? metadata.bio.trim() : '';
   if (!metadataTxId || !userEpitaph) return;
   if (typeof window === 'undefined' || !window.localStorage) return;
@@ -164,325 +191,410 @@ function persistEpitaphForTx(metadataTxId, metadata) {
   }
 }
 
-/**
- * Downscale an image File to a compact JPEG data URL (fits localStorage).
- * Uses multi-stage fallback (FileReader -> ObjectURL -> raw DataURL) for Android Chrome compatibility.
- */
-async function fileToCompactDataUrl(file, maxSide = 640, quality = 0.82) {
-  if (!file || typeof document === 'undefined' || file.size === 0) return '';
-  const looksLikeImage = Boolean(
-    file.type?.startsWith('image/') ||
-    /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '') ||
-    !file.type
-  );
-  if (!looksLikeImage) return '';
+// ============================================================
+// ANS-104 DataItem Construction & Signing (Browser + Node WebCrypto)
+// ============================================================
 
-  const drawImgToJpeg = (srcUrl) =>
-    new Promise((resolve, reject) => {
+const utf8Encoder = new TextEncoder();
+
+function concatUint8Arrays(...arrays) {
+  let totalLength = 0;
+  for (let i = 0; i < arrays.length; i += 1) {
+    totalLength += arrays[i].byteLength;
+  }
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (let i = 0; i < arrays.length; i += 1) {
+    result.set(arrays[i], offset);
+    offset += arrays[i].byteLength;
+  }
+  return result;
+}
+
+async function webCryptoDigest(algorithm, data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const digestBuffer = await crypto.subtle.digest(algorithm, bytes);
+  return new Uint8Array(digestBuffer);
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Computes the Arweave ANS-104 `deepHash` (SHA-384 recursive merkle-like digest)
+ * using native WebCrypto (`crypto.subtle.digest('SHA-384', ...)`).
+ */
+export async function computeAns104DeepHash(chunk) {
+  if (Array.isArray(chunk)) {
+    const listTag = concatUint8Arrays(
+      utf8Encoder.encode('list'),
+      utf8Encoder.encode(String(chunk.length))
+    );
+    let acc = await webCryptoDigest('SHA-384', listTag);
+    for (let i = 0; i < chunk.length; i += 1) {
+      const childHash = await computeAns104DeepHash(chunk[i]);
+      acc = await webCryptoDigest('SHA-384', concatUint8Arrays(acc, childHash));
+    }
+    return acc;
+  }
+  const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+  const blobTag = concatUint8Arrays(
+    utf8Encoder.encode('blob'),
+    utf8Encoder.encode(String(bytes.byteLength))
+  );
+  const taggedHash = concatUint8Arrays(
+    await webCryptoDigest('SHA-384', blobTag),
+    await webCryptoDigest('SHA-384', bytes)
+  );
+  return webCryptoDigest('SHA-384', taggedHash);
+}
+
+/** Encodes a non-negative integer as an Apache Avro zig-zag variable-length integer. */
+function encodeAvroZigZagVarInt(value) {
+  let z = (value << 1) ^ (value >> 31);
+  const out = [];
+  while ((z & ~0x7f) !== 0) {
+    out.push((z & 0x7f) | 0x80);
+    z >>>= 7;
+  }
+  out.push(z & 0x7f);
+  return new Uint8Array(out);
+}
+
+/**
+ * Serializes `[{ name, value }]` tags into the ANS-104 Apache Avro binary array format.
+ */
+export function serializeAns104Tags(tags = []) {
+  const validTags = (tags || []).filter(
+    (t) => t && String(t.name || '').trim() && t.value !== undefined && t.value !== null
+  );
+  if (validTags.length === 0) return new Uint8Array(0);
+
+  const chunks = [encodeAvroZigZagVarInt(validTags.length)];
+  for (let i = 0; i < validTags.length; i += 1) {
+    const nameBytes = utf8Encoder.encode(String(validTags[i].name));
+    const valueBytes = utf8Encoder.encode(String(validTags[i].value));
+    chunks.push(
+      encodeAvroZigZagVarInt(nameBytes.byteLength),
+      nameBytes,
+      encodeAvroZigZagVarInt(valueBytes.byteLength),
+      valueBytes
+    );
+  }
+  // Terminating 0x00 marks the end of the Avro array block
+  chunks.push(new Uint8Array([0]));
+  return concatUint8Arrays(...chunks);
+}
+
+function writeUint64LE(value) {
+  const buf = new Uint8Array(8);
+  const view = new DataView(buf.buffer);
+  view.setBigUint64(0, BigInt(value), true);
+  return buf;
+}
+
+// Reuse a single ephemeral secp256k1 keypair per browser session for signing ANS-104 DataItems
+let sessionEphemeralPrivateKey = null;
+function getSessionEphemeralPrivateKey() {
+  if (!sessionEphemeralPrivateKey) {
+    sessionEphemeralPrivateKey = generatePrivateKey();
+  }
+  return sessionEphemeralPrivateKey;
+}
+
+/**
+ * Builds and signs a binary ANS-104 DataItem (`SignatureType = 3`, Ethereum secp256k1).
+ *
+ * @param {{
+ *   dataBytes: Uint8Array | ArrayBuffer,
+ *   tags?: Array<{ name: string, value: string }>,
+ *   privateKey?: `0x${string}`,
+ * }} params
+ * @returns {Promise<{ id: string, rawBytes: Uint8Array, byteLength: number }>}
+ */
+export async function createAndSignAns104DataItem(firstArg, secondTags) {
+  const isOptionsObject =
+    firstArg &&
+    !(firstArg instanceof Uint8Array) &&
+    !(firstArg instanceof ArrayBuffer) &&
+    typeof firstArg === 'object' &&
+    'dataBytes' in firstArg;
+  const dataBytes = isOptionsObject ? firstArg.dataBytes : firstArg;
+  const tags = (isOptionsObject ? firstArg.tags : secondTags) || [];
+  const privateKey = (isOptionsObject && firstArg.privateKey) || getSessionEphemeralPrivateKey();
+
+  const payload = dataBytes instanceof Uint8Array ? dataBytes : new Uint8Array(dataBytes);
+  const cleanTags = (tags || []).filter(
+    (t) => t && String(t.name || '').trim() && t.value !== undefined && t.value !== null
+  );
+  const account = privateKeyToAccount(privateKey);
+  // Uncompressed 65-byte secp256k1 public key (0x04 + 32-byte X + 32-byte Y)
+  const ownerBytes = hexToBytes(account.publicKey);
+  const targetBytes = new Uint8Array(0);
+  const anchorBytes = new Uint8Array(0);
+  const tagsBytes = serializeAns104Tags(cleanTags);
+
+  const deepHashDigest = await computeAns104DeepHash([
+    utf8Encoder.encode('dataitem'),
+    utf8Encoder.encode('1'),
+    utf8Encoder.encode('3'), // SignatureType 3 = Ethereum secp256k1
+    ownerBytes,
+    targetBytes,
+    anchorBytes,
+    tagsBytes,
+    payload,
+  ]);
+
+  const signatureHex = await account.signMessage({
+    message: { raw: deepHashDigest },
+  });
+  const signatureBytes = hexToBytes(signatureHex); // 65 bytes (r + s + v)
+
+  const rawBytes = concatUint8Arrays(
+    new Uint8Array([3, 0]), // uint16LE(3) = Ethereum signature type
+    signatureBytes,         // 65 bytes
+    ownerBytes,             // 65 bytes
+    new Uint8Array([0, 0]), // target present = 0, anchor present = 0
+    writeUint64LE(cleanTags.length),
+    writeUint64LE(tagsBytes.byteLength),
+    tagsBytes,
+    payload
+  );
+
+  // Canonical ANS-104 DataItem ID is base64url(SHA-256(signatureBytes))
+  const idDigest = await webCryptoDigest('SHA-256', signatureBytes);
+  const id = bytesToBase64Url(idDigest);
+
+  return {
+    id,
+    rawBytes,
+    binary: rawBytes,
+    byteLength: rawBytes.byteLength,
+  };
+}
+
+/**
+ * Signs `dataBytes` + `tags` as an ANS-104 DataItem and uploads it to ArDrive Turbo's
+ * free bundler endpoint (`https://upload.ardrive.io/v1/tx`, free for items <= 100 KB).
+ *
+ * @param {Uint8Array | ArrayBuffer} dataBytes
+ * @param {Array<{ name: string, value: string }>} tags
+ * @param {{ uploadUrl?: string, fetchImpl?: typeof fetch }} options
+ * @returns {Promise<string>} Permanent 43-character Arweave transaction ID
+ */
+export async function uploadDataItemToTurbo(
+  dataBytes,
+  tags = [],
+  { uploadUrl = TURBO_UPLOAD_URL, fetchImpl = fetch } = {}
+) {
+  const { id: computedId, rawBytes, byteLength } = await createAndSignAns104DataItem({
+    dataBytes,
+    tags,
+  });
+
+  if (byteLength > TURBO_FREE_MAX_BYTES) {
+    throw new Error(
+      `Arweave DataItem size (${(byteLength / 1024).toFixed(1)} KB) exceeds the 100 KB free bundler limit.`
+    );
+  }
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetchImpl(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          Accept: 'application/json',
+        },
+        body: rawBytes,
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => '');
+        throw new Error(`Turbo bundler HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 120)}` : ''}`);
+      }
+
+      const result = await response.json().catch(() => ({}));
+      const txId = String(result?.id || computedId).trim();
+      if (!txId || txId.length < 40) {
+        throw new Error('Turbo bundler returned an invalid transaction ID');
+      }
+      return txId;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+    }
+  }
+  throw lastErr || new Error('Failed to upload DataItem to Arweave via Turbo bundler');
+}
+
+/**
+ * Ensures an image `File` / `Blob` fits within `maxBytes` (95,000 bytes) before uploading to Turbo.
+ * Normally `photoPipeline.js` already produces a `<= 95_000` byte JPEG; this is a secondary guard
+ * in case a caller passed an uncompressed or raw-fallback image.
+ */
+async function ensureFileUnderTurboLimit(file, maxBytes = MAX_TURBO_PHOTO_BYTES) {
+  if (!file || file.size <= maxBytes || typeof document === 'undefined') {
+    return file;
+  }
+
+  let objectUrl = '';
+  let canvas = null;
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
       const el = new Image();
-      const timer = setTimeout(() => {
-        el.onload = null;
-        el.onerror = null;
-        reject(new Error('Image load timeout'));
-      }, 6000);
+      const timer = setTimeout(() => reject(new Error('Image decode timeout')), 8000);
       el.onload = () => {
         clearTimeout(timer);
-        try {
-          const nw = el.naturalWidth || el.width;
-          const nh = el.naturalHeight || el.height;
-          if (!nw || !nh) {
-            reject(new Error('Invalid image dimensions'));
-            return;
-          }
-          const scale = Math.min(1, maxSide / Math.max(nw, nh));
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, Math.round(nw * scale));
-          canvas.height = Math.max(1, Math.round(nh * scale));
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            reject(new Error('Canvas context unavailable'));
-            return;
-          }
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
-          const out = canvas.toDataURL('image/jpeg', quality);
-          canvas.width = 0;
-          canvas.height = 0;
-          resolve(out);
-        } catch (e) {
-          reject(e);
-        }
+        resolve(el);
       };
       el.onerror = () => {
         clearTimeout(timer);
-        reject(new Error('Image load error'));
+        reject(new Error('Image decode error'));
       };
-      el.src = srcUrl;
+      el.src = objectUrl;
     });
 
-  // Attempt 1: FileReader.readAsDataURL + new Image()
-  let rawDataUrl = '';
-  try {
-    const readerData = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error || new Error('FileReader error'));
-      reader.readAsDataURL(file);
-    });
-    if (typeof readerData === 'string' && readerData.startsWith('data:')) {
-      if (readerData.startsWith('data:image/')) {
-        rawDataUrl = readerData;
-      } else {
-        const commaIdx = readerData.indexOf(',');
-        rawDataUrl = commaIdx !== -1 ? `data:image/jpeg;base64,${readerData.slice(commaIdx + 1)}` : readerData;
-      }
-      const compressed = await drawImgToJpeg(rawDataUrl);
-      if (compressed && compressed.startsWith('data:image/jpeg;base64,')) {
-        return compressed;
-      }
-    }
-  } catch (err1) {
-    console.warn('[MOCK] FileReader compression attempt note:', err1?.message || err1);
-  }
+    const nw = img.naturalWidth || img.width;
+    const nh = img.naturalHeight || img.height;
+    if (!nw || !nh) return file;
 
-  // Attempt 2: URL.createObjectURL + new Image() (revoke only after draw completes)
-  let objectUrl = '';
-  try {
-    objectUrl = URL.createObjectURL(file);
-    const compressed = await drawImgToJpeg(objectUrl);
-    if (compressed && compressed.startsWith('data:image/jpeg;base64,')) {
-      return compressed;
+    const dims = [800, 720, 640, 560, 480];
+    const qualities = [0.76, 0.66, 0.56, 0.46];
+
+    for (const dim of dims) {
+      const scale = Math.min(1, dim / Math.max(nw, nh));
+      canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(nw * scale));
+      canvas.height = Math.max(1, Math.round(nh * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) break;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      for (const q of qualities) {
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', q));
+        if (blob && blob.size <= maxBytes) {
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas = null;
+          const base = String(file.name || 'photo').replace(/\.[^.]+$/, '') || 'photo';
+          return new File([blob], `${base}.jpg`, { type: 'image/jpeg' });
+        }
+      }
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas = null;
     }
-  } catch (err2) {
-    console.warn('[MOCK] ObjectURL compression attempt note:', err2?.message || err2);
+  } catch (err) {
+    console.warn('[Arweave] Secondary compression guard note:', err?.message || err);
   } finally {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (canvas) {
+      try {
+        canvas.width = 0;
+        canvas.height = 0;
+      } catch {}
+    }
+    if (objectUrl) {
+      try { URL.revokeObjectURL(objectUrl); } catch {}
+    }
   }
+  return file;
+}
 
-  // Attempt 3: Ultimate fallback to raw Data URL if small enough for localStorage
-  if (rawDataUrl && rawDataUrl.length < 2_500_000) {
-    return rawDataUrl;
+function arrayBufferToDataUrl(buffer, mime = 'image/jpeg') {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
-  return '';
+  return `data:${mime};base64,${btoa(binary)}`;
 }
 
 /**
- * Generate and fund a DEV wallet on ArLocal.
- * Returns the JWK object for signing, or 'use_wallet' for PROD.
+ * Permanently uploads an image `File` (`<= 95 KB`) to Arweave as a signed ANS-104 DataItem
+ * via ArDrive Turbo (`https://upload.ardrive.io/v1/tx`), and primes the local optimistic cache
+ * so the image renders at 0ms on the creator's device while gateways index the transaction.
  *
- * @returns {Promise<object|string>} JWK or 'use_wallet'
- */
-async function getSigningKey() {
-  if (import.meta.env.DEV) {
-    const jwk = await arweave.wallets.generate();
-    const address = await arweave.wallets.jwkToAddress(jwk);
-
-    // Mint 10 000 AR (10_000 * 10^12 winston) — enough for many transactions
-    const mintRes = await arweave.api.get(`/mint/${address}/10000000000000000`);
-    if (mintRes.status !== 200) {
-      throw new Error(`[ArLocal] Failed to mint test tokens: HTTP ${mintRes.status}. Is ArLocal running on port 1984?`);
-    }
-    console.log(`[ArLocal] Minted 10 000 AR for ${address}`);
-    return jwk;
-  }
-
-  // PROD: ArConnect browser extension handles signing.
-  // resolveStorageMode() routes to mock storage before we get here if it's missing.
-  if (typeof window === 'undefined' || !window.arweaveWallet) {
-    throw new Error('[Arweave] ArConnect extension not available for signing.');
-  }
-  return 'use_wallet';
-}
-
-/**
- * Upload a transaction via the chunked Uploader API and mine the block (DEV).
- * Throws if upload fails or tx.id is empty.
- *
- * @param {Arweave.Transaction} tx
- * @returns {Promise<string>} Transaction ID
- */
-async function uploadAndVerify(tx) {
-  if (!tx.id || tx.id === '') {
-    throw new Error('[Arweave] Transaction ID is empty after signing — sign step failed.');
-  }
-
-  // Use chunked Uploader API — reliable for large files, avoids timeout
-  const uploader = await arweave.transactions.getUploader(tx);
-  while (!uploader.isComplete) {
-    await uploader.uploadChunk();
-    console.log(`[Arweave] Upload progress: ${uploader.pctComplete.toFixed(0)}% (chunk ${uploader.uploadedChunks}/${uploader.totalChunks})`);
-  }
-
-  // For DEV: mine the block immediately so the data is queryable
-  if (import.meta.env.DEV) {
-    const mineRes = await arweave.api.get('/mine');
-    if (mineRes.status !== 200) {
-      console.warn(`[ArLocal] /mine returned HTTP ${mineRes.status} — data may not be immediately available.`);
-    } else {
-      console.log('[ArLocal] Block mined. Transaction confirmed:', tx.id);
-    }
-
-    // Confirm the data is retrievable
-    const statusRes = await arweave.transactions.getStatus(tx.id);
-    if (statusRes.status !== 200) {
-      throw new Error(`[ArLocal] Transaction ${tx.id} not confirmed after mining. Status: ${statusRes.status}`);
-    }
-  }
-
-  console.log('[Arweave] Upload complete. TxID:', tx.id);
-  return tx.id;
-}
-
-/**
- * Upload a file (image/video) to Arweave.
- * Falls back to mock storage (never throws for missing ArConnect / ArLocal).
- *
- * @param {File} file - The file to upload
- * @param {Object[]} extraTags - Optional extra Arweave tags [{name, value}]
- * @returns {Promise<string>} Arweave transaction ID (or `mock_…` ID)
+ * @param {File} file - The prepared image file (`<= 95 KB`)
+ * @param {Object[]} extraTags - Optional extra Arweave tags `[{ name, value }]`
+ * @returns {Promise<string>} Permanent 43-character Arweave transaction ID
  */
 export async function uploadToArweave(file, extraTags = []) {
-  const mode = await resolveStorageMode();
-  if (mode === 'mock') {
-    const mockTxId = generateMockTxId();
-    // Kept in memory only; buildNftMetadata() embeds it into the metadata JSON,
-    // which is what gets persisted (avoids storing the image twice).
-    const dataUrl = await fileToCompactDataUrl(file);
-    if (dataUrl) mockMemoryStore.set(mockTxId, dataUrl);
-    console.log('[MOCK] Stored file locally:', mockTxId, dataUrl ? `(${(dataUrl.length / 1024).toFixed(1)} KB)` : '(no preview)');
-    return mockTxId;
+  if (!file || file.size === 0) {
+    throw new Error('Cannot upload an empty file to Arweave');
   }
 
-  console.log('[Arweave] Starting file upload…', file.name, `(${(file.size / 1024).toFixed(1)} KB)`);
+  const readyFile = await ensureFileUnderTurboLimit(file, MAX_TURBO_PHOTO_BYTES);
+  const imageBuffer = await readyFile.arrayBuffer();
+  const contentType = readyFile.type || 'image/jpeg';
 
-  const jwk = await getSigningKey();
+  const tags = [
+    { name: 'Content-Type', value: contentType },
+    { name: 'App-Name', value: 'MemoryChain' },
+    ...extraTags.map(({ name, value }) => ({ name: String(name), value: String(value) })),
+  ];
 
-  // Read raw bytes — required for correct binary upload
-  const imageBuffer = await file.arrayBuffer();
+  console.log(
+    '[Arweave] Uploading photo DataItem to ArDrive Turbo…',
+    readyFile.name || 'photo.jpg',
+    `(${(imageBuffer.byteLength / 1024).toFixed(1)} KB)`
+  );
 
-  const tx = await arweave.createTransaction({ data: imageBuffer }, jwk);
-  tx.addTag('Content-Type', file.type || 'application/octet-stream');
-  tx.addTag('App-Name', 'MemoryChain');
-  extraTags.forEach(({ name, value }) => tx.addTag(name, String(value)));
+  const txId = await uploadDataItemToTurbo(imageBuffer, tags);
 
-  await arweave.transactions.sign(tx, jwk);
-
-  // Guard: tx.id must be non-empty after signing
-  if (!tx.id) {
-    throw new Error('[Arweave] Image transaction ID is empty after signing.');
+  // Prime the optimistic local cache (used only to avoid gateway indexing latency right after mint)
+  try {
+    const optimisticDataUrl = arrayBufferToDataUrl(imageBuffer, contentType);
+    setOptimisticCacheEntry(txId, optimisticDataUrl);
+  } catch (cacheErr) {
+    console.warn('[Arweave] Optimistic photo cache note:', cacheErr?.message || cacheErr);
   }
 
-  return uploadAndVerify(tx);
+  console.log('[Arweave] Photo permanently uploaded. TxID:', txId);
+  return txId;
 }
 
 /**
- * Upload JSON metadata to Arweave.
- * Uses TextEncoder for correct UTF-8 encoding (Cyrillic, emoji, etc.)
- * Throws on any failure — this will cancel the entire mint flow.
+ * Permanently uploads NFT metadata JSON (`~1 KB`) to Arweave as a signed ANS-104 DataItem
+ * via ArDrive Turbo (`https://upload.ardrive.io/v1/tx`), and primes the local optimistic cache.
  *
  * @param {Object} metadata - The JSON metadata object
- * @returns {Promise<string>} Arweave transaction ID
+ * @returns {Promise<string>} Permanent 43-character Arweave transaction ID
  */
 export async function uploadJsonToArweave(metadata) {
-  const mode = await resolveStorageMode();
-  if (mode === 'mock') {
-    const mockTxId = generateMockTxId();
-    const storageKey = `${MOCK_STORAGE_PREFIX}${mockTxId}`;
-    let json = JSON.stringify(metadata);
-    mockMemoryStore.set(mockTxId, json);
+  const jsonString = JSON.stringify(metadata);
+  const metadataBytes = utf8Encoder.encode(jsonString);
 
-    // Always persist lightweight text-only backup first (~300 bytes) so user epitaph is never lost to image quota
-    if (typeof window !== 'undefined' && window.localStorage) {
-      try {
-        const textOnly = JSON.stringify({ ...metadata, image: '' });
-        window.localStorage.setItem(`${MOCK_STORAGE_PREFIX}text_${mockTxId}`, textOnly);
-      } catch {
-        // ignore
-      }
-    }
-    try {
-      window.localStorage.setItem(storageKey, json);
-    } catch (err) {
-      // Quota exceeded (large base64 image) — first strip base64 images from older mock entries
-      // while preserving their text metadata (epitaph/description, dates, breed) so user stories are never lost.
-      console.warn('[MOCK] localStorage quota reached, compacting older mock images:', err?.name || err);
-      try {
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const k = window.localStorage.key(i);
-          if (k && k.startsWith(MOCK_STORAGE_PREFIX) && k !== storageKey) {
-            const rawOld = window.localStorage.getItem(k);
-            if (rawOld && rawOld.length > 2048) {
-              try {
-                const parsedOld = JSON.parse(rawOld);
-                if (parsedOld && parsedOld.image) {
-                  parsedOld.image = '';
-                  window.localStorage.setItem(k, JSON.stringify(parsedOld));
-                }
-              } catch {
-                // ignore malformed entry
-              }
-            }
-          }
-        }
-        window.localStorage.setItem(storageKey, json);
-      } catch {
-        // Still over quota — persist this memorial's text metadata (epitaph, dates, attributes) without the photo
-        json = JSON.stringify({ ...metadata, image: '' });
-        try {
-          window.localStorage.setItem(storageKey, json);
-        } catch (err2) {
-          console.warn('[MOCK] Could not persist metadata; it will be available for this session only.', err2);
-        }
-      }
-    }
-    console.log('[MOCK] Stored metadata locally:', mockTxId, metadata);
-    persistEpitaphForTx(mockTxId, metadata);
-    return mockTxId;
-  }
+  const tags = [
+    { name: 'Content-Type', value: 'application/json' },
+    { name: 'App-Name', value: 'MemoryChain' },
+  ];
 
-  console.log('[Arweave] Starting metadata upload…', metadata);
+  console.log(
+    '[Arweave] Uploading metadata DataItem to ArDrive Turbo…',
+    `(${(metadataBytes.byteLength / 1024).toFixed(2)} KB)`
+  );
 
-  const jwk = await getSigningKey();
+  const txId = await uploadDataItemToTurbo(metadataBytes, tags);
 
-  // TextEncoder gives strict UTF-8 binary — required for Cyrillic and all unicode
-  const metadataBuffer = new TextEncoder().encode(JSON.stringify(metadata));
+  // Prime optimistic cache for 0ms reads right after minting + persist per-memorial epitaph backup
+  setOptimisticCacheEntry(txId, jsonString);
+  persistEpitaphForTx(txId, metadata);
 
-  const tx = await arweave.createTransaction({ data: metadataBuffer }, jwk);
-  tx.addTag('Content-Type', 'application/json');
-  tx.addTag('App-Name', 'MemoryChain');
-
-  await arweave.transactions.sign(tx, jwk);
-
-  // Guard: tx.id must be non-empty after signing
-  if (!tx.id) {
-    throw new Error('[Arweave] Metadata transaction ID is empty after signing.');
-  }
-
-  // Additional guard: verify using post() before switching to uploader
-  const response = await arweave.transactions.post(tx);
-  if (response.status !== 200 && response.status !== 202) {
-    throw new Error(`[Arweave] Metadata upload failed with HTTP ${response.status}: ${JSON.stringify(response.data)}`);
-  }
-
-  // Mine the block (DEV only)
-  if (import.meta.env.DEV) {
-    const mineRes = await arweave.api.get('/mine');
-    if (mineRes.status !== 200) {
-      console.warn(`[ArLocal] /mine returned HTTP ${mineRes.status}`);
-    } else {
-      console.log('[ArLocal] Block mined. Metadata TxID:', tx.id);
-    }
-
-    const statusRes = await arweave.transactions.getStatus(tx.id);
-    if (statusRes.status !== 200) {
-      throw new Error(`[ArLocal] Metadata tx ${tx.id} not confirmed after mining. Status: ${statusRes.status}`);
-    }
-  }
-
-  console.log('[Arweave] Metadata upload complete. TxID:', tx.id);
-  persistEpitaphForTx(tx.id, metadata);
-  return tx.id;
+  console.log('[Arweave] Metadata permanently uploaded. TxID:', txId);
+  return txId;
 }
 
 /**
@@ -501,7 +613,7 @@ function yearFromDate(date) {
  * Build NFT-standard metadata JSON for a pet memorial.
  * Follows OpenSea / ERC-721 metadata standard.
  *
- * - image: HTTP URL for DEV (ArLocal), ar:// URI for PROD
+ * - image: `ar://<imageTxId>` permanent Arweave URI
  * - description: "A Brief Memory" form field (epitaph)
  * - birth_year / passing_year: top-level for fast parsing + in attributes[]
  */
@@ -530,7 +642,7 @@ export function buildNftMetadata({
     ? ''
     : isMockTxId(imageTxId)
       ? (mockMemoryStore.get(imageTxId) || '')
-      : (import.meta.env.DEV ? `${ARWEAVE_GATEWAY}/${imageTxId}` : `ar://${imageTxId}`);
+      : `ar://${extractArweaveTxId(imageTxId)}`;
 
   const cleanUserEpitaph = typeof description === 'string' ? description.trim() : '';
   const finalEpitaph =
@@ -584,9 +696,7 @@ export function buildNftMetadata({
   };
 
   if (videoTxId && !isMockTxId(videoTxId)) {
-    metadata.animation_url = import.meta.env.DEV
-      ? `${ARWEAVE_GATEWAY}/${videoTxId}`
-      : `ar://${videoTxId}`;
+    metadata.animation_url = `ar://${extractArweaveTxId(videoTxId)}`;
   }
 
   return metadata;

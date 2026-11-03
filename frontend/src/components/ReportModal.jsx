@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt, useChainId, useAccount, useReadContract, useSwitchChain, useEstimateFeesPerGas } from 'wagmi';
-import { baseSepolia } from 'viem/chains';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { CONTRACT_ABI } from '../config/contract';
-import { getContractAddress } from '../config/chains';
+import { getContractAddress, ACTIVE_CHAIN, ACTIVE_NETWORK_NAME } from '../config/chains';
 import { formatTxError } from '../utils/txErrors';
 import {
   getActiveWalletChainId,
@@ -51,7 +50,7 @@ export default function ReportModal({
   const [submittedTxHash, setSubmittedTxHash] = useState(null);
   const submittingRef = useRef(false);
 
-  const { data: feeData } = useEstimateFeesPerGas({ chainId: baseSepolia.id });
+  const { data: feeData } = useEstimateFeesPerGas({ chainId: ACTIVE_CHAIN.id });
 
   // Read has_created_memorial for Sybil Guard check
   const { data: hasCreatedMemorial, isFetched: isSybilCheckFetched } = useReadContract({
@@ -172,7 +171,7 @@ export default function ReportModal({
     error: receiptError,
   } = useWaitForTransactionReceipt({
     hash: txHash,
-    chainId: baseSepolia.id,
+    chainId: ACTIVE_CHAIN.id,
     timeout: RECEIPT_TIMEOUT_MS,
   });
 
@@ -287,20 +286,20 @@ export default function ReportModal({
         fallbackChainId: chainId,
       });
 
-      if (currentWalletChainId !== null && currentWalletChainId !== baseSepolia.id) {
+      if (currentWalletChainId !== null && currentWalletChainId !== ACTIVE_CHAIN.id) {
         try {
           if (activeWallet?.walletClientType === 'privy' || !connector) {
             if (activeWallet?.switchChain) {
-              await activeWallet.switchChain(baseSepolia.id);
+              await activeWallet.switchChain(ACTIVE_CHAIN.id);
             }
           } else if (switchChainAsync && connector) {
-            await switchChainAsync({ chainId: baseSepolia.id });
+            await switchChainAsync({ chainId: ACTIVE_CHAIN.id });
           } else if (activeWallet?.switchChain) {
-            await activeWallet.switchChain(baseSepolia.id);
+            await activeWallet.switchChain(ACTIVE_CHAIN.id);
           }
         } catch (switchErr) {
           console.error('[Report] Switch chain error:', switchErr);
-          setError(formatTxError(switchErr, 'Please switch your wallet network to Base Sepolia and try again.'));
+          setError(formatTxError(switchErr, `Please switch your wallet network to ${ACTIVE_NETWORK_NAME} and try again.`));
           return;
         }
       }
@@ -328,7 +327,7 @@ export default function ReportModal({
             abi: CONTRACT_ABI,
             functionName: 'report_memorial',
             args: [BigInt(memorialId || 0)],
-            chainId: baseSepolia.id,
+            chainId: ACTIVE_CHAIN.id,
             ...gasConfig,
           },
         });
@@ -540,7 +539,7 @@ export default function ReportModal({
               {isPending || isSubmitting
                 ? 'Submitting...'
                 : isConfirming
-                  ? 'Confirming on Base Sepolia...'
+                  ? `Confirming on ${ACTIVE_NETWORK_NAME}...`
                   : 'Submit Report'}
             </button>
           )}

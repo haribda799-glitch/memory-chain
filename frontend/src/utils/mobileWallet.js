@@ -3,7 +3,7 @@
 // ============================================================
 
 import { createWalletClient, custom } from 'viem';
-import { baseSepolia } from 'viem/chains';
+import { ACTIVE_CHAIN } from '../config/chains';
 
 const SYNC_COOLDOWN_MS = 3000; // Strict 3-second cooldown between returning-wallet sync checks
 let lastSyncTimestamp = 0;
@@ -321,13 +321,13 @@ export async function sendContractWithPrivyFallback({
 
   const executeViaPrivyProvider = async (wallet, { withGasOverrides }) => {
     const walletChainId = parseNumericChainId(wallet.chainId);
-    if (walletChainId !== null && walletChainId !== baseSepolia.id && typeof wallet.switchChain === 'function') {
-      await wallet.switchChain(baseSepolia.id);
+    if (walletChainId !== null && walletChainId !== ACTIVE_CHAIN.id && typeof wallet.switchChain === 'function') {
+      await wallet.switchChain(ACTIVE_CHAIN.id);
     }
     const provider = await wallet.getEthereumProvider();
     const walletClient = createWalletClient({
       account: wallet.address,
-      chain: baseSepolia,
+      chain: ACTIVE_CHAIN,
       transport: custom(provider),
     });
     return await walletClient.writeContract({
@@ -338,7 +338,7 @@ export async function sendContractWithPrivyFallback({
       ...(baseParams.value !== undefined ? { value: baseParams.value } : {}),
       ...(withGasOverrides && maxFeePerGas !== undefined ? { maxFeePerGas } : {}),
       ...(withGasOverrides && maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas } : {}),
-      chain: baseSepolia,
+      chain: ACTIVE_CHAIN,
       account: wallet.address,
     });
   };
@@ -354,7 +354,7 @@ export async function sendContractWithPrivyFallback({
       ...baseParams,
       account: privyWallet?.address || activeAddress,
       ...(connector ? { connector } : {}),
-      chainId: baseSepolia.id,
+      chainId: ACTIVE_CHAIN.id,
     });
   } catch (err) {
     // 3. Last resort: wagmi's connector is not attached yet (e.g. right after F5)

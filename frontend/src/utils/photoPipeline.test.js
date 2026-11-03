@@ -8,7 +8,14 @@ import {
   cachePhotoAiResult,
   getCachedPhotoAiResult,
   MAX_SESSION_CACHE_ENTRIES,
+  MAX_ARWEAVE_FREE_PHOTO_BYTES,
 } from './photoPipeline.js';
+import {
+  createAndSignAns104DataItem,
+  buildNftMetadata,
+  getArweaveUrl,
+  ARWEAVE_GATEWAY,
+} from './arweave.js';
 
 function makeMagicBuffer(hexBytes, totalSize = 64) {
   const out = new Uint8Array(Math.max(totalSize, hexBytes.length));
@@ -221,4 +228,74 @@ test('sessionPhotoCache returns cached result on repeat selection without touchi
   }
   // Original file was evicted after 10 newer entries
   assert.equal(getCachedPhotoAiResult(file), null);
+});
+
+test('preparePhotoSequentially steps down quality/dimensions until jpegBlob.size <= 95_000 bytes (MAX_ARWEAVE_FREE_PHOTO_BYTES)', async () => {
+  clearSessionPhotoCache();
+  assert.equal(MAX_ARWEAVE_FREE_PHOTO_BYTES, 95_000);
+
+  const rawJpeg = new Uint8Array(140_000);
+  rawJpeg[0] = 0xFF;
+  rawJpeg[1] = 0xD8;
+  rawJpeg[2] = 0xFF;
+  rawJpeg[3] = 0xE0;
+
+  const file = new File([rawJpeg], 'high_detail_pet.jpg', {
+    type: 'image/jpeg',
+    lastModified: 1700000555000,
+  });
+
+  const attemptedCalls = [];
+  const result = await preparePhotoSequentially(file, {
+    wakeupDelayMs: 0,
+    decode: async ({ maxDim, quality }) => {
+      attemptedCalls.push({ maxDim, quality });
+      // Simulate >95 KB at 0.82 and 0.72, then 68 KB at 0.62
+      const simulatedSize = quality > 0.65 ? 112_000 : 68_000;
+      const outBytes = new Uint8Array(simulatedSize);
+      outBytes[0] = 0xFF;
+      outBytes[1] = 0xD8;
+      outBytes[2] = 0xFF;
+      return {
+        jpegDataUrl: 'data:image/jpeg;base64,/9j/compressed',
+        jpegBlob: new Blob([outBytes], { type: 'image/jpeg' }),
+        width: maxDim,
+        height: maxDim,
+      };
+    },
+  });
+
+  assert.ok(attemptedCalls.length >= 2);
+  assert.ok(result.uploadFile.size <= MAX_ARWEAVE_FREE_PHOTO_BYTES);
+  assert.equal(result.uploadFile.size, 68_000);
+});
+
+test('createAndSignAns104DataItem builds a valid ANS-104 DataItem (SignatureType=3) and getArweaveUrl resolves via turbo-gateway.com', async () => {
+  const payload = new TextEncoder().encode(JSON.stringify({ name: 'Luna', species: 'Dog' }));
+  const { id, binary } = await createAndSignAns104DataItem(payload, [
+    { name: 'Content-Type', value: 'application/json' },
+    { name: 'App-Name', value: 'MemoryChain' },
+  ]);
+
+  // Arweave txId is 43 base64url chars (SHA-256 of 65-byte signature)
+  assert.equal(id.length, 43);
+  assert.match(id, /^[A-Za-z0-9_-]{43}$/);
+
+  // ANS-104 header: bytes [0..1] = 0x03, 0x00 (little-endian SignatureType = 3, Ethereum secp256k1)
+  assert.equal(binary[0], 3);
+  assert.equal(binary[1], 0);
+  // Byte 2 + 65 (owner uncompressed secp256k1 pubkey prefix) = 0x04
+  assert.equal(binary[2 + 65], 0x04);
+  assert.ok(binary.byteLength < 95_000);
+
+  const meta = buildNftMetadata({
+    petName: 'Luna',
+    description: 'Forever loved',
+    species: 'Dog',
+    imageTxId: id,
+    ownerAddress: '0x1111111111111111111111111111111111111111',
+  });
+  assert.equal(meta.image, `ar://${id}`);
+  assert.equal(getArweaveUrl(`ar://${id}`), `${ARWEAVE_GATEWAY}/${id}`);
+  assert.equal(getArweaveUrl(id), `${ARWEAVE_GATEWAY}/${id}`);
 });

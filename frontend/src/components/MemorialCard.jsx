@@ -17,7 +17,7 @@ const PLACEHOLDER = 'https://images.unsplash.com/photo-1544568100-847a948585b9?a
  */
 function resolveImageUrl(raw) {
   if (!raw) return '';
-  if (raw.startsWith('ar://')) return `https://arweave.net/${raw.slice(5)}`;
+  if (raw.startsWith('ar://')) return getArweaveUrl(raw);
   return raw;
 }
 

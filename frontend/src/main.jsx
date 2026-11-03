@@ -7,9 +7,12 @@ import { PrivyProvider } from '@privy-io/react-auth';
 import { WagmiProvider } from '@privy-io/wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { baseSepolia, mainnet, base } from 'viem/chains';
-import { wagmiConfig, WALLETCONNECT_METADATA } from './config/chains';
+import { wagmiConfig, WALLETCONNECT_METADATA, ACTIVE_CHAIN, IS_MAINNET } from './config/chains';
 
 const queryClient = new QueryClient();
+const SUPPORTED_CHAINS = IS_MAINNET
+  ? [base, mainnet, baseSepolia]
+  : [baseSepolia, mainnet, base];
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -17,12 +20,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       appId="cmriav2u300wd0cjnf2wy07xb"
       config={{
         loginMethods: ['email', 'wallet'],
-        // Putting baseSepolia first makes it Privy's defaultChain while keeping WalletConnect v2
+        // Putting ACTIVE_CHAIN first makes it Privy's defaultChain while keeping WalletConnect v2
         // namespaces optional (including mainnet/base) so Mobile MetaMask on Android/iOS never
-        // rejects the pairing if the user has not pre-added Base Sepolia in MetaMask yet.
-        supportedChains: [baseSepolia, mainnet, base],
+        // rejects the pairing if the user has not pre-added the chain in MetaMask yet.
+        supportedChains: SUPPORTED_CHAINS,
         fundingConfig: {
-          targetChain: baseSepolia,
+          targetChain: ACTIVE_CHAIN,
         },
         appearance: {
           landingHeader: 'Memory Chain',
