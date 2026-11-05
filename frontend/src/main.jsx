@@ -23,6 +23,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         // Putting ACTIVE_CHAIN first makes it Privy's defaultChain while keeping WalletConnect v2
         // namespaces optional (including mainnet/base) so Mobile MetaMask on Android/iOS never
         // rejects the pairing if the user has not pre-added the chain in MetaMask yet.
+        defaultChain: ACTIVE_CHAIN,
         supportedChains: SUPPORTED_CHAINS,
         fundingConfig: {
           targetChain: ACTIVE_CHAIN,

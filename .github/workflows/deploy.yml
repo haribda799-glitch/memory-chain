@@ -34,10 +34,12 @@ jobs:
       - name: Install dependencies
         run: cd frontend && npm ci --legacy-peer-deps
 
-      - name: Build frontend
+      - name: Build frontend (Base Mainnet 8453)
         env:
-          VITE_CORE_CONTRACT_ADDRESS: ${{ secrets.VITE_CORE_CONTRACT_ADDRESS }}
-          VITE_MODERATION_MODULE_ADDRESS: ${{ secrets.VITE_MODERATION_MODULE_ADDRESS }}
+          VITE_NETWORK: mainnet
+          VITE_CONTRACT_ADDRESS: 0xB5467c3189907428a7feD5F7cb6C084AE8d743B2
+          VITE_MODERATION_MODULE_ADDRESS: 0xc25e0a5d32ded38ae39ebdae9323287460bf7426
+          VITE_COUNCIL_SAFE_ADDRESS: 0x4C28A82cAafdaD1B8AfbC9d7aBF3a411fE2a768c
           VITE_WC_PROJECT_ID: ${{ secrets.VITE_WC_PROJECT_ID }}
         run: cd frontend && npm run build
 

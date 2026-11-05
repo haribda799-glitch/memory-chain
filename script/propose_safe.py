@@ -9,6 +9,8 @@ from moccasin.config import get_active_network
 from src import MemoryChainCore
 
 DEFAULT_MAINNET_SAFE = "0x4C28A82cAafdaD1B8AfbC9d7aBF3a411fE2a768c"
+DEFAULT_MAINNET_CORE = "0xB5467c3189907428a7feD5F7cb6C084AE8d743B2"
+DEFAULT_MAINNET_MOD = "0xc25e0a5d32ded38ae39ebdae9323287460bf7426"
 DEFAULT_SEPOLIA_SAFE = "0x7D29Ae44D5041b59012e784818446088774305F5"
 DEFAULT_SEPOLIA_CORE = "0x5de836cf6fc88d88eec93309663372ad723baf8f"
 DEFAULT_SEPOLIA_MOD = "0x7120f05831bab3742b58a0a17e7a9b64789f30f3"
@@ -33,7 +35,7 @@ def main():
 
     core_address = os.getenv(
         "CORE_ADDRESS",
-        os.getenv("VITE_CONTRACT_ADDRESS", "" if is_mainnet else DEFAULT_SEPOLIA_CORE),
+        os.getenv("VITE_CONTRACT_ADDRESS", DEFAULT_MAINNET_CORE if is_mainnet else DEFAULT_SEPOLIA_CORE),
     ).strip()
     safe_address = os.getenv(
         "SAFE_MULTISIG_ADDRESS",
@@ -41,7 +43,7 @@ def main():
     ).strip()
     expected_mod = os.getenv(
         "MODERATION_MODULE_ADDRESS",
-        os.getenv("VITE_MODERATION_MODULE_ADDRESS", "" if is_mainnet else DEFAULT_SEPOLIA_MOD),
+        os.getenv("VITE_MODERATION_MODULE_ADDRESS", DEFAULT_MAINNET_MOD if is_mainnet else DEFAULT_SEPOLIA_MOD),
     ).strip()
 
     assert core_address, "Укажите CORE_ADDRESS или VITE_CONTRACT_ADDRESS в окружении!"
