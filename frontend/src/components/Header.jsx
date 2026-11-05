@@ -297,6 +297,15 @@ export default function Header() {
                         <div className="px-4 py-3 text-sm text-[#85736d] italic">Initializing wallet...</div>
                       ) : (
                         <>
+                          <button
+                            onClick={() => {
+                              handleShowPrivyWallet();
+                              setUserMenuOpen(false);
+                            }}
+                            className="text-left px-3 py-2 text-sm font-semibold text-primary hover:bg-surface-tint rounded-lg flex items-center gap-2 cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[18px]">add_card</span> + Fund Wallet
+                          </button>
                           {embeddedWallet && (
                             <>
                               <button onClick={() => { handleShowPrivyWallet(); setUserMenuOpen(false); }} className="text-left px-3 py-2 text-sm text-on-surface hover:bg-surface-tint rounded-lg flex items-center gap-2">
@@ -308,9 +317,9 @@ export default function Header() {
                               <button onClick={() => { exportWallet(); setUserMenuOpen(false); }} className="text-left px-3 py-2 text-sm text-on-surface hover:bg-surface-tint rounded-lg flex items-center gap-2">
                                 <span className="material-symbols-outlined text-[18px]">key</span> Export Key
                               </button>
-                              <div className="h-px bg-outline-variant/15 my-1" />
                             </>
                           )}
+                          <div className="h-px bg-outline-variant/15 my-1" />
                           <button onClick={() => handleLogout(() => setUserMenuOpen(false))} className="text-left px-3 py-2 text-sm text-error hover:bg-error-container rounded-lg flex items-center gap-2">
                             <span className="material-symbols-outlined text-[18px]">logout</span> Disconnect
                           </button>
@@ -382,6 +391,15 @@ export default function Header() {
             {isUserAuthenticated ? (
               <div className="flex flex-col space-y-4 pl-2">
                 <span className="text-xs text-on-surface-variant uppercase tracking-wider font-bold">Wallet Actions</span>
+                <button
+                  onClick={() => {
+                    handleShowPrivyWallet();
+                    setMenuOpen(false);
+                  }}
+                  className="text-left text-primary font-semibold text-body-md flex items-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-[18px]">add_card</span> + Fund Wallet
+                </button>
                 {embeddedWallet && (
                   <>
                     <button onClick={() => { handleShowPrivyWallet(); setMenuOpen(false); }} className="text-left text-on-surface-variant text-body-md flex items-center gap-2">

@@ -2,6 +2,8 @@
  * Shared, user-friendly (English-only) formatting of wallet / transaction errors.
  * Works with viem / wagmi error objects (BaseError chain with `cause`, `shortMessage`, `name`, `code`).
  */
+import { IS_MAINNET } from '../config/contract';
+import { ACTIVE_NETWORK_NAME } from '../config/chains';
 
 function walkErrorChain(err, visit) {
   let current = err;
@@ -82,10 +84,12 @@ export function formatTxError(err, fallback = 'Transaction failed. Please try ag
   const text = collectText(err);
 
   if (/insufficient funds|exceeds the balance|total cost .* exceeds/i.test(text)) {
-    return 'Insufficient Base Sepolia ETH to cover the amount plus network fees. Top up your wallet from a faucet and try again.';
+    return IS_MAINNET
+      ? `Insufficient ${ACTIVE_NETWORK_NAME} ETH to cover the amount plus network fees. Please fund your wallet and try again.`
+      : `Insufficient ${ACTIVE_NETWORK_NAME} ETH to cover the amount plus network fees. Top up your wallet from a faucet and try again.`;
   }
   if (/chain mismatch|does not match the target chain|switch.*chain|unsupported chain|wrong network/i.test(text)) {
-    return 'Please switch your wallet network to Base Sepolia and try again.';
+    return `Please switch your wallet network to ${ACTIVE_NETWORK_NAME} and try again.`;
   }
   if (/connector not connected|not connected|no account|account not found/i.test(text)) {
     return 'Wallet is not connected. Please reconnect your wallet and try again.';
@@ -105,7 +109,7 @@ export function formatTxError(err, fallback = 'Transaction failed. Please try ag
 
   if (/reverted/i.test(text)) return 'The transaction was reverted by the contract.';
   if (/network|fetch|timeout|HTTP request failed/i.test(text)) {
-    return 'Network error while contacting Base Sepolia. Please check your connection and try again.';
+    return `Network error while contacting ${ACTIVE_NETWORK_NAME}. Please check your connection and try again.`;
   }
 
   const short = (err && typeof err === 'object' && err.shortMessage) || '';
