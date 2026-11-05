@@ -6,15 +6,22 @@ import { useModalBehavior } from '../hooks/useModalBehavior';
 const EXPORT_QR_SIZE = 1024;
 
 /**
- * Builds a clean canonical memorial link (`<origin><BASE_URL>#/memorial/<id>`) when the given URL points
- * at a memorial route, dropping stray query params and fixing a missing deploy base path.
+ * Builds a clean canonical memorial link (`<origin><pathname>#/memorial/<id>`) dynamically
+ * from `window.location.origin + window.location.pathname` so links and QR codes work on any
+ * Arweave Permaweb gateway (`https://arweave.net/<txId>/`, `https://g8way.io/<txId>/`), IPFS, or custom domain.
  */
-function toCanonicalMemorialUrl(rawUrl) {
+export function toCanonicalMemorialUrl(rawUrl, memorialIdFallback = '') {
   if (typeof window === 'undefined') return rawUrl;
   const match = String(rawUrl || '').match(/#\/memorial\/([^/?#&]+)/);
-  if (!match) return rawUrl;
-  const base = import.meta.env.BASE_URL || '/';
-  return `${window.location.origin}${base}#/memorial/${match[1]}`;
+  const id = match ? match[1] : String(memorialIdFallback || '').trim();
+  const pathname = window.location.pathname || '/';
+  const basePath = pathname.endsWith('.html')
+    ? pathname.replace(/[^/]+$/, '')
+    : pathname.endsWith('/')
+      ? pathname
+      : `${pathname}/`;
+  if (!id) return rawUrl || `${window.location.origin}${basePath}`;
+  return `${window.location.origin}${basePath}#/memorial/${id}`;
 }
 
 /** Legacy clipboard fallback (non-secure contexts / old browsers). Returns true only if the copy succeeded. */
@@ -61,8 +68,8 @@ export default function ShareModal({
   const copied = copyStatus === 'copied';
 
   const memorialUrl = useMemo(
-    () => toCanonicalMemorialUrl(url || (typeof window !== 'undefined' ? window.location.href : '')),
-    [url]
+    () => toCanonicalMemorialUrl(url || (typeof window !== 'undefined' ? window.location.href : ''), memorialId),
+    [url, memorialId]
   );
 
   // Clear pending timers on unmount.

@@ -35,11 +35,11 @@ export const DEFAULT_CHAIN_ID = ACTIVE_CHAIN.id;
 export const ACTIVE_NETWORK_NAME = IS_MAINNET ? 'Base' : 'Base Sepolia';
 export { IS_MAINNET };
 
-// Canonical dApp metadata for WalletConnect Verify API (prevents DOMAIN_MISMATCH high-risk warnings)
+// Canonical dApp metadata for WalletConnect Verify API (resolved dynamically from current gateway origin)
 export const WALLETCONNECT_METADATA = {
   name: 'Memory Chain',
   description: 'Memory Chain — Decentralized pet memorial on the blockchain.',
-  url: typeof window !== 'undefined' ? window.location.origin : 'https://haribda799-glitch.github.io',
+  url: typeof window !== 'undefined' ? window.location.origin : 'https://arweave.net',
   icons: [],
 };
 

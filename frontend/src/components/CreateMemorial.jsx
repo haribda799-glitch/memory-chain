@@ -33,7 +33,7 @@ import {
   revokeAllTrackedObjectUrls,
   cachePhotoAiResult,
 } from '../utils/photoPipeline';
-import ShareModal from './ShareModal';
+import ShareModal, { toCanonicalMemorialUrl } from './ShareModal';
 
 const SPECIES_OPTIONS = ['Dog', 'Cat', 'Horse', 'Fish', 'Rabbit', 'Hamster', 'Turtle', 'Other'];
 
@@ -1469,7 +1469,7 @@ export default function CreateMemorial() {
     const isPublicTribute = Boolean(mintedIsPublic);
     const memorialTargetUrl = finalTokenId ? `/memorial/${finalTokenId}` : '/my';
     const memorialShareUrl = finalTokenId
-      ? `${typeof window !== 'undefined' ? window.location.origin : ''}${import.meta.env.BASE_URL}#/memorial/${finalTokenId}`
+      ? toCanonicalMemorialUrl('', finalTokenId)
       : (typeof window !== 'undefined' ? window.location.href : '');
 
     return (
