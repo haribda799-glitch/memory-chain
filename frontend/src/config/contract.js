@@ -21,6 +21,7 @@ export const ACTIVE_CHAIN_ID = IS_MAINNET ? 8453 : 84532;
 
 const DEFAULT_SEPOLIA_CORE = '0x5de836cf6fc88d88eec93309663372ad723baf8f';
 const DEFAULT_SEPOLIA_MODERATION = '0x7120f05831bab3742b58a0a17e7a9b64789f30f3';
+const DEFAULT_MAINNET_MODERATION = '0xC25E0A5d32DED38ae39EbdAE9323287460Bf7426';
 
 const envContractAddress = String(env.VITE_CONTRACT_ADDRESS || '').trim();
 const envModerationAddress = String(env.VITE_MODERATION_MODULE_ADDRESS || '').trim();
@@ -46,7 +47,7 @@ export const MODERATION_MODULE_ADDRESSES = {
   8453:
     String(env.VITE_BASE_MAINNET_MODERATION_ADDRESS || '').trim() ||
     envModerationAddress ||
-    DEFAULT_SEPOLIA_MODERATION,
+    DEFAULT_MAINNET_MODERATION,
 };
 
 export const COUNCIL_SAFE_ADDRESS =

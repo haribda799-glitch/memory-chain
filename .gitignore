@@ -19,6 +19,7 @@ out/
 lib/
 .build/
 .deployments.db
+.mainnet_deploy_state.json
 
 # Node / Frontend
 frontend/node_modules/
