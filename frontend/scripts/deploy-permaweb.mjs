@@ -160,6 +160,14 @@ export async function deployPermaweb({ dryRun = false } = {}) {
         `File "${file.relPath}" is ${stat.size} bytes, exceeding the ${MAX_TURBO_PHOTO_BYTES}-byte free Arweave upload limit!`,
       );
     }
+    if (file.relPath.endsWith('.js') || file.relPath.endsWith('.mjs')) {
+      const jsContent = fs.readFileSync(file.fullPath, 'utf8');
+      if (jsContent.includes('__VITE_PRELOAD__')) {
+        throw new Error(
+          `File "${file.relPath}" contains unreplaced __VITE_PRELOAD__ placeholder!`,
+        );
+      }
+    }
   }
   console.log(`[✓] Pre-flight check passed: all ${files.length} files <= 95 KB (largest: ${maxFileName} at ${maxFileBytes} bytes)`);
 

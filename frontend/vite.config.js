@@ -7,14 +7,25 @@ const PART_SLICE_CHARS = 55_000;
 
 /**
  * Splits any emitted JS chunk whose minified output still exceeds MAX_PERMAWEB_FREE_BYTES
- * into < 70 KB ES module part files while preserving the exact filename, imports, and export
- * bindings of the parent chunk so every file in dist/ fits inside ArDrive Turbo's free tier (<= 95 KB).
+ * into < 70 KB ES module part files while:
+ * 1) Stripping any residual `__VITE_PRELOAD__` placeholders (`void 0`),
+ * 2) Resolving all dynamic `import(...)` calls via `new URL(u, __base).href` in the outer ES module
+ *    scope (never relative to eval/document root),
+ * 3) Preserving the exact filename, imports, and export bindings of the parent chunk.
  */
 function arweavePermawebChunkLimitPlugin() {
   return {
     name: 'arweave-permaweb-chunk-limit',
     enforce: 'post',
     generateBundle(_options, bundle) {
+      // Pass 1: sanitize any residual __VITE_PRELOAD__ placeholder across all chunks
+      for (const item of Object.values(bundle)) {
+        if (item.type === 'chunk' && typeof item.code === 'string' && item.code.includes('__VITE_PRELOAD__')) {
+          item.code = item.code.replace(/\b__VITE_PRELOAD__\b/g, 'void 0');
+        }
+      }
+
+      // Pass 2: split any chunk > MAX_PERMAWEB_FREE_BYTES into <= 65 KB part modules
       for (const [fileName, item] of Object.entries(bundle)) {
         if (item.type !== 'chunk' || typeof item.code !== 'string') continue;
         if (Buffer.byteLength(item.code, 'utf8') <= MAX_PERMAWEB_FREE_BYTES) continue;
@@ -75,8 +86,9 @@ function arweavePermawebChunkLimitPlugin() {
           : bodyWithoutImports;
 
         const pureBody = rawBody
+          .replace(/\b__VITE_PRELOAD__\b/g, 'void 0')
           .replace(/\bimport\.meta\b/g, '__mc_import_meta__')
-          .replace(/\bimport\s*\((?=[`"])/g, '__mc_dyn_import__(');
+          .replace(/\bimport\s*\(/g, '__mc_dyn_import__(');
 
         const returnStmt =
           exportsList.length > 0
@@ -108,7 +120,12 @@ function arweavePermawebChunkLimitPlugin() {
 
         const uniqueImportedVars = [...new Set(importedVars)];
         const fnParamNames = [...uniqueImportedVars, '__mc_import_meta__', '__mc_dyn_import__'];
-        const fnArgExprs = [...uniqueImportedVars, 'import.meta', '(u)=>import(u)'];
+        const fnArgExprs = [...uniqueImportedVars, 'import.meta', '__mc_dyn_import__'];
+
+        const runtimeHelpers = [
+          'const __base=import.meta.url;',
+          'const __mc_dyn_import__=(u)=>import(typeof u==="string"&&(u.startsWith("./")||u.startsWith("../"))?new URL(u,__base).href:u);',
+        ];
 
         if (exportsList.length > 0) {
           const exportBindings = exportsList
@@ -122,6 +139,7 @@ function arweavePermawebChunkLimitPlugin() {
           item.code = [
             ...importStatements,
             ...partImports,
+            ...runtimeHelpers,
             `const __mc_mod=new Function(${fnParamNames.map((n) => JSON.stringify(n)).join(',')},${partVars.join('+')})(${fnArgExprs.join(',')});`,
             exportBindings,
             exportClause,
@@ -130,6 +148,7 @@ function arweavePermawebChunkLimitPlugin() {
           item.code = [
             ...importStatements,
             ...partImports,
+            ...runtimeHelpers,
             `new Function(${fnParamNames.map((n) => JSON.stringify(n)).join(',')},${partVars.join('+')})(${fnArgExprs.join(',')});`,
           ].join('\n');
         }
@@ -147,15 +166,22 @@ export default defineConfig({
   base: './',
   build: {
     outDir: 'dist',
+    assetsDir: '.',
+    modulePreload: false,
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined;
+          // Keep @privy-io and @reown/@walletconnect in their own natural code-split chunks
+          // so lazy modal screens (LandingScreen, ConnectEmailForm, etc.) stay small native ES modules
+          if (id.includes('@privy-io') || id.includes('@reown') || id.includes('@walletconnect')) {
+            return undefined;
+          }
           if (id.includes('react-dom')) return 'vendor-react-dom';
           if (id.includes('react-router') || id.includes('@remix-run')) return 'vendor-router';
           if (id.includes('/react/') || id.includes('scheduler')) return 'vendor-react';
           if (id.includes('@tanstack/react-query')) return 'vendor-query';
-          if (id.includes('qrcode.react')) return 'vendor-qrcode';
+          if (id.includes('qrcode.react') || id.includes('/qrcode/')) return 'vendor-qrcode';
           if (id.includes('@tensorflow-models')) return 'vendor-tf-models';
           if (id.includes('@tensorflow/tfjs-core')) return 'vendor-tf-core';
           if (id.includes('@tensorflow/tfjs-backend-cpu')) return 'vendor-tf-cpu';
@@ -167,7 +193,7 @@ export default defineConfig({
           if (id.includes('viem/_esm/actions')) return 'vendor-viem-actions';
           if (id.includes('viem/_esm/utils')) return 'vendor-viem-utils';
           if (id.includes('viem')) return 'vendor-viem-core';
-          if (id.includes('wagmi') || id.includes('@wagmi')) return 'vendor-wagmi';
+          if (id.includes('/wagmi/') || id.includes('@wagmi/')) return 'vendor-wagmi';
           if (id.includes('@noble') || id.includes('@scure')) return 'vendor-crypto';
           if (id.includes('ox/')) return 'vendor-ox';
           if (id.includes('zod')) return 'vendor-zod';
