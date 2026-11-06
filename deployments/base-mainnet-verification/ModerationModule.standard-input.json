@@ -1,0 +1,21 @@
+{
+  "language": "Vyper",
+  "sources": {
+    "src/ModerationModule.vy": {
+      "content": "# pragma version ~=0.4.3\n# pragma evm-version cancun\n\n\"\"\"\n@title ModerationModule — Stateless moderation rule engine\n@license MIT\n@author ericozz\n@notice Pure logic module for community-driven moderation.\n        Implements ceiling division to eliminate truncation bias\n        and enforces a minimum user quorum to prevent early-stage Sybil censorship.\n\n        Invariants:\n        1. Ceiling Division: thresholds never drop below the declared percentage.\n        2. Cold Start Guard: automatic hiding requires at least MIN_COMMUNITY_QUORUM users.\n        3. Flagging active at all stages to provide early warning to the Council.\n\"\"\"\n\n# Минимальный размер сообщества для включения автоматического скрытия\nMIN_COMMUNITY_QUORUM: constant(uint256) = 20\n\n# Процентные ставки порогов\nHIDDEN_PERCENT: constant(uint256) = 20\nFLAGGED_PERCENT: constant(uint256) = 5\n\n# Минимальные абсолютные барьеры\nMIN_FLAGGED_THRESHOLD: constant(uint256) = 2\n\n\n@external\n@pure\ndef is_hidden(report_weight: uint256, total_users: uint256) -> bool:\n    \"\"\"\n    @notice Determines if a memorial should be hidden from the gallery.\n    @dev Uses ceiling division: (users * 20 + 99) // 100.\n         Requires total_users >= MIN_COMMUNITY_QUORUM to prevent cheap early Sybil attacks.\n    @param report_weight Accumulated weighted report score on the memorial.\n    @param total_users   Total number of memorial owners (Sybil-resistant base).\n    @return True if quorum reached and report_weight >= ceil(20% of total_users).\n    \"\"\"\n    # Защита от деления на 0 и атаки ранней стадии\n    if total_users < MIN_COMMUNITY_QUORUM:\n        return False\n\n    # Ceil division: гарантирует округление строго вверх\n    threshold: uint256 = (total_users * HIDDEN_PERCENT + 99) // 100\n\n    return report_weight >= threshold\n\n\n@external\n@pure\ndef is_flagged(report_weight: uint256, total_users: uint256) -> bool:\n    \"\"\"\n    @notice Determines if a memorial should be flagged for review.\n    @dev Operates even before quorum to alert Council dashboard. Uses ceiling division.\n    @param report_weight Accumulated weighted report score on the memorial.\n    @param total_users   Total number of memorial owners (Sybil-resistant base).\n    @return True if report_weight >= max(ceil(5% of total_users), MIN_FLAGGED_THRESHOLD).\n    \"\"\"\n    if total_users == 0:\n        return False\n\n    # Ceil division: (users * 5 + 99) // 100\n    threshold: uint256 = (total_users * FLAGGED_PERCENT + 99) // 100\n    if threshold < MIN_FLAGGED_THRESHOLD:\n        threshold = MIN_FLAGGED_THRESHOLD\n\n    return report_weight >= threshold\n",
+      "sha256sum": "bc0beb206df400036ed3c369623e7bbabc6e5ef1019b93331effe9b8d7754de8"
+    }
+  },
+  "settings": {
+    "outputSelection": {
+      "src/ModerationModule.vy": [
+        "*"
+      ]
+    },
+    "search_paths": [
+      "."
+    ]
+  },
+  "compiler_version": "v0.4.3+commit.bff19ea2",
+  "integrity": "eca63b74b4441efa4a412d9afc66c467e6e8fbf2bd699f2f13935f4aeb6fc32e"
+}

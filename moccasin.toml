@@ -13,7 +13,7 @@ url = "$BASE_SEPOLIA_RPC"
 chain_id = 84532
 default_account_name = "deployer_account"
 prompt_live = true
-explorer_uri = "https://api-sepolia.basescan.org/api"
+explorer_uri = "https://api.etherscan.io/v2/api"
 explorer_type = "etherscan"
 explorer_api_key = "$BASESCAN_API_KEY"
 
@@ -22,6 +22,6 @@ url = "$BASE_MAINNET_RPC"
 chain_id = 8453
 default_account_name = "deployer_account"
 prompt_live = true
-explorer_uri = "https://api.basescan.org/api"
+explorer_uri = "https://api.etherscan.io/v2/api"
 explorer_type = "etherscan"
 explorer_api_key = "$BASESCAN_API_KEY"
